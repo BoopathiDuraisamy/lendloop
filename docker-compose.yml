@@ -22,6 +22,8 @@ services:
       # Code nodes read LENDLOOP_* from the environment and use node:crypto for HMAC.
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
       - NODE_FUNCTION_ALLOW_BUILTIN=crypto
+      # Send Code-node console.log (mock notifications, error reports) to container logs.
+      - CODE_ENABLE_STDOUT=true
       # Keep failed executions for debugging; prune old ones.
       - EXECUTIONS_DATA_PRUNE=true
       - EXECUTIONS_DATA_MAX_AGE=336

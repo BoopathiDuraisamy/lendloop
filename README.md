@@ -217,7 +217,7 @@ A quick-tunnel URL changes whenever the `tunnel` container restarts, and Cloudfl
 | `email` | the affected person | full message + link | SMTP login (e.g. Gmail App Password) |
 | `slack` | the affected person, as a **private DM** found by their LendLoop email | full message + link | Slack app bot token (`chat:write`, `users:read`, `users:read.email`) |
 | `discord` | everyone in one channel | **anonymized**: tool + dates only. Only new requests, loans and returns; no declines, cancellations or overdue reminders | channel webhook URL |
-| `mock` | nobody (logged, emails masked) | n/a | nothing (default) |
+| `mock` | nobody: logged to the n8n container (`docker compose logs n8n \| grep "\[mock\]"`), emails masked | subject line | nothing (default) |
 
 Secrets go in `n8n/secrets.env` (copy `n8n/secrets.env.example`, git-ignored), then run
 `docker compose run --rm n8n-credentials`. It stores them as encrypted n8n credentials (**LendLoop SMTP**,
