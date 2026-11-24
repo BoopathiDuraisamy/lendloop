@@ -102,10 +102,29 @@ RBAC is enforced in Convex functions, not only in the UI:
 
 - Every public function starts with `requireUser(ctx)` / `requireAdmin(ctx)` (`convex/lib/auth.ts`) and resolves the caller from the **verified Clerk JWT** (`ctx.auth.getUserIdentity()`). User ids are never accepted from the client for authorization.
 - Ownership checks happen per operation. `tools.update` requires owner. `tools.remove` requires owner or admin. `loans.decide` and `loans.markReturned` require the lender. `loans.cancel` requires the borrower. `loans.listAll`, `users.listForAdmin`, `users.setTrustedLender` and `automation.recentFailures` require admin.
-- **Admin is never self-assigned.** It is granted via the `ADMIN_EMAILS` deployment env var (verified email) or the CLI-only internal mutation `users:setRole`.
+- **Admin is never self-assigned.** It is granted via the `ADMIN_EMAILS` deployment env var (verified email) or the internal mutation `users:setRole`, which the app can't call: only the Convex CLI or dashboard can run it (see [Managing admins](#managing-admins)).
 - Functions n8n uses (`automation.*`) are **internal**. They can't be called from the browser, only through the signed HTTP endpoints.
 - Errors are typed `ConvexError({code, message})` (UNAUTHENTICATED / FORBIDDEN / NOT_FOUND / BAD_REQUEST), and the UI shows the message.
 - `src/proxy.ts` only redirects signed-out users away from `/dashboard`. It's a UX convenience, not a security boundary.
+
+### Managing admins
+
+There is intentionally no in-app control for granting admin, so no one can promote themselves through the app.
+Both options below work from the [Convex dashboard](https://dashboard.convex.dev) (your project → the dev or prod deployment) or the CLI.
+
+**Option 1: allow-list by email (recommended).** Add the email to `ADMIN_EMAILS`, comma-separated:
+- Dashboard: **Settings → Environment Variables → `ADMIN_EMAILS`** → e.g. `you@example.com,newadmin@example.com` → Save.
+- CLI: `npx convex env set ADMIN_EMAILS "you@example.com,newadmin@example.com"`
+
+The person becomes admin the next time they load the dashboard, provided Clerk reports that email as **verified**
+(Google and GitHub sign-ins always are). Removing an email from the list doesn't demote anyone; use Option 2 for that.
+
+**Option 2: set the role of someone who has signed in.**
+- Dashboard: **Functions → users → setRole** → arguments `{"email": "newadmin@example.com", "role": "admin"}` → Run.
+- CLI: `npx convex run users:setRole '{"email":"newadmin@example.com","role":"admin"}'`
+
+Use `"role": "user"` to revoke. Someone still listed in `ADMIN_EMAILS` regains admin on their next visit, so remove them
+there too. Avoid editing the `role` field directly in **Data → users**, because it bypasses these functions.
 
 ---
 
