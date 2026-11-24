@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { getCurrentUser, requireAdmin } from "./lib/auth";
@@ -27,7 +27,7 @@ export const store = mutation({
   args: {},
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Not authenticated");
+    if (!identity) throw new ConvexError({ code: "UNAUTHENTICATED", message: "Sign in required." });
 
     const tokenEmail = identity.email?.toLowerCase();
     const tokenName = identity.name ?? identity.givenName;
@@ -111,7 +111,7 @@ export const setTrustedLender = mutation({
   handler: async (ctx, { userId, trusted }) => {
     await requireAdmin(ctx);
     const target = await ctx.db.get(userId);
-    if (!target) throw new Error("User not found");
+    if (!target) throw new ConvexError({ code: "NOT_FOUND", message: "User not found." });
     await ctx.db.patch(userId, { trustedLender: trusted });
   },
 });
@@ -124,7 +124,7 @@ export const setRole = internalMutation({
       .query("users")
       .withIndex("by_email", (q) => q.eq("email", email.toLowerCase()))
       .unique();
-    if (!user) throw new Error(`No user with email ${email}. Sign in once first.`);
+    if (!user) throw new ConvexError({ code: "NOT_FOUND", message: `No user with email ${email}. Sign in once first.` });
     await ctx.db.patch(user._id, { role });
     return user._id;
   },
