@@ -11,9 +11,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const shared = readFileSync(join(root, "code", "_shared.js"), "utf8");
-const code = (file, withShared = true) =>
-  (withShared ? shared + "\n" : "") + readFileSync(join(root, "code", file), "utf8");
+// Normalize CRLF so the generated JSON is identical on Windows checkouts.
+const read = (file) => readFileSync(join(root, "code", file), "utf8").replace(/\r\n/g, "\n");
+const shared = read("_shared.js");
+const code = (file, withShared = true) => (withShared ? shared + "\n" : "") + read(file);
 
 // Deterministic UUIDs so regenerating doesn't churn the diff.
 const uuid = (seed) => {
@@ -171,6 +172,15 @@ const remind = {
       position: [0, 300],
       parameters: { rule: { interval: [{ field: "cronExpression", expression: "0 9 * * *" }] } },
     },
+    {
+      // Lets you run it on demand from the editor or `n8n execute --id=lendloopRemind01`.
+      id: uuid(`${REMIND}:Manual`),
+      name: "Run now (manual)",
+      type: "n8n-nodes-base.manualTrigger",
+      typeVersion: 1,
+      position: [0, 500],
+      parameters: {},
+    },
     codeNode(REMIND, "Sign request", "remind-sign-fetch.js", [220, 300]),
     signedPost(REMIND, "Fetch overdue loans", "/n8n/overdue-loans", [440, 300]),
     codeNode(REMIND, "Split loans", "remind-split.js", [660, 300]),
@@ -180,6 +190,7 @@ const remind = {
   ],
   connections: {
     "Every day 09:00": link("Sign request"),
+    "Run now (manual)": link("Sign request"),
     "Sign request": link("Fetch overdue loans"),
     "Fetch overdue loans": link("Split loans"),
     "Split loans": link("Send reminder (mock)"),

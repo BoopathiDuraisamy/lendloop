@@ -33,6 +33,17 @@
       }
     },
     {
+      "id": "13b54af3-91dc-4ae5-ab29-136536f6f9bf",
+      "name": "Run now (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        500
+      ],
+      "parameters": {}
+    },
+    {
       "id": "c61c7abd-585c-463b-af19-189e0859ec72",
       "name": "Sign request",
       "type": "n8n-nodes-base.code",
@@ -160,6 +171,17 @@
   ],
   "connections": {
     "Every day 09:00": {
+      "main": [
+        [
+          {
+            "node": "Sign request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run now (manual)": {
       "main": [
         [
           {

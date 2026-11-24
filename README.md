@@ -126,7 +126,7 @@ The signature covers the exact payload **string**, so neither side has to re-ser
 
 ### Workflow 3 – Error handler (`n8n/workflows/error-handler.json`)
 
-Both workflows set `settings.errorWorkflow` to it. An **Error Trigger** catches any failed execution (for example, HTTP retries exhausted or a rejected signature), logs it, and posts a signed report to `/n8n/workflow-error`, which is idempotent on execution id. Failures then show up under **Admin → Automation failures**. Nothing fails silently: Convex-side failures are recorded too, and n8n keeps all failed executions (`saveDataErrorExecution: all`).
+Both workflows set `settings.errorWorkflow` to it (it must be published as well). An **Error Trigger** catches any failed execution (for example, HTTP retries exhausted or a rejected signature), logs it, and posts a signed report to `/n8n/workflow-error`, which is idempotent on execution id. Failures then show up under **Admin → Automation failures**. Nothing fails silently: Convex-side failures are recorded too, and n8n keeps all failed executions (`saveDataErrorExecution: all`).
 
 ### Secrets
 
@@ -189,9 +189,31 @@ CLERK_SECRET_KEY=sk_test_...
 ```bash
 cp n8n/.env.example n8n/.env        # set N8N_ENCRYPTION_KEY and LENDLOOP_HMAC_SECRET (= Convex N8N_WEBHOOK_SECRET)
 docker compose run --rm n8n-import  # imports the 3 workflows (fixed ids, so errorWorkflow links resolve)
-docker compose up -d n8n            # http://localhost:5678, create the owner account
+docker compose up -d n8n            # editor at http://localhost:5678 (create the owner account on first visit)
+
+# Publish (activate) all three. n8n 2.x only runs an error workflow if it is published too.
+docker compose exec n8n n8n publish:workflow --id=lendloopNotify01
+docker compose exec n8n n8n publish:workflow --id=lendloopRemind01
+docker compose exec n8n n8n publish:workflow --id=lendloopErrors01
+docker compose restart n8n
 ```
-In the n8n UI, **activate** "Request notifications" and "Daily overdue reminders". The error handler needs no activation. To test reminders right away, open the reminders workflow and click **Execute workflow**.
+
+**Let Convex cloud reach the webhook.** `docker compose --profile tunnel up -d` starts a Cloudflare quick
+tunnel (no account needed) in front of an nginx proxy that forwards **only**
+`POST /webhook/lendloop-request-events`. The n8n editor and API are never exposed (every other path is 404).
+```bash
+docker compose --profile tunnel up -d
+docker compose logs tunnel | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com'
+npx convex env set N8N_REQUEST_WEBHOOK_URL https://<that-host>/webhook/lendloop-request-events
+```
+A quick-tunnel URL changes whenever the `tunnel` container restarts. Re-run the last two commands when it does,
+or use a named Cloudflare tunnel or n8n Cloud for a stable URL.
+
+**Run the overdue reminders now** (instead of waiting for 09:00): open the workflow in the editor and click
+*Execute workflow* (it has a "Run now" manual trigger), or from the CLI:
+```bash
+docker compose exec -e N8N_RUNNERS_BROKER_PORT=5690 n8n n8n execute --id=lendloopRemind01
+```
 
 ### 6. Run
 ```bash
