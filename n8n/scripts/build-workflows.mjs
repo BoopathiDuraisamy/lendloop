@@ -1,0 +1,226 @@
+// Builds n8n/workflows/*.json from the Code-node sources in n8n/code/.
+// Keeping node code in .js files makes it reviewable/lintable; the JSON is what
+// gets imported into n8n. Run: node n8n/scripts/build-workflows.mjs
+//
+// No secrets are ever written into the JSON: Code/HTTP nodes read
+// $env.LENDLOOP_HMAC_SECRET and $env.LENDLOOP_CONVEX_SITE_URL at runtime.
+
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const shared = readFileSync(join(root, "code", "_shared.js"), "utf8");
+const code = (file, withShared = true) =>
+  (withShared ? shared + "\n" : "") + readFileSync(join(root, "code", file), "utf8");
+
+// Deterministic UUIDs so regenerating doesn't churn the diff.
+const uuid = (seed) => {
+  const h = createHash("sha1").update(seed).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
+};
+
+const ERROR_WORKFLOW_ID = "lendloopErrors01";
+
+const settings = (withErrorWorkflow = true) => ({
+  executionOrder: "v1",
+  saveDataErrorExecution: "all",
+  saveDataSuccessExecution: "all",
+  saveManualExecutions: true,
+  ...(withErrorWorkflow ? { errorWorkflow: ERROR_WORKFLOW_ID } : {}),
+});
+
+const codeNode = (wf, name, file, position, extra = {}) => ({
+  id: uuid(`${wf}:${name}`),
+  name,
+  type: "n8n-nodes-base.code",
+  typeVersion: 2,
+  position,
+  parameters: { jsCode: code(file), ...extra },
+});
+
+/** POST a signed envelope ({payload,timestamp,signature} from the previous node) to Convex. */
+const signedPost = (wf, name, path, position) => ({
+  id: uuid(`${wf}:${name}`),
+  name,
+  type: "n8n-nodes-base.httpRequest",
+  typeVersion: 4.2,
+  position,
+  retryOnFail: true,
+  maxTries: 4,
+  waitBetweenTries: 5000,
+  parameters: {
+    method: "POST",
+    url: `={{ $env.LENDLOOP_CONVEX_SITE_URL }}${path}`,
+    sendHeaders: true,
+    headerParameters: {
+      parameters: [
+        { name: "x-lendloop-timestamp", value: "={{ $json.timestamp }}" },
+        { name: "x-lendloop-signature", value: "={{ $json.signature }}" },
+      ],
+    },
+    sendBody: true,
+    specifyBody: "json",
+    jsonBody: "={{ JSON.stringify({ payload: $json.payload }) }}",
+    options: { timeout: 15000 },
+  },
+});
+
+const ifNode = (wf, name, leftValue, position) => ({
+  id: uuid(`${wf}:${name}`),
+  name,
+  type: "n8n-nodes-base.if",
+  typeVersion: 2,
+  position,
+  parameters: {
+    conditions: {
+      options: { caseSensitive: true, leftValue: "", typeValidation: "strict" },
+      conditions: [
+        {
+          id: uuid(`${wf}:${name}:cond`),
+          leftValue,
+          rightValue: true,
+          operator: { type: "boolean", operation: "true", singleValue: true },
+        },
+      ],
+      combinator: "and",
+    },
+    options: {},
+  },
+});
+
+const respond = (wf, name, code, body, position) => ({
+  id: uuid(`${wf}:${name}`),
+  name,
+  type: "n8n-nodes-base.respondToWebhook",
+  typeVersion: 1.1,
+  position,
+  parameters: {
+    respondWith: "json",
+    responseBody: JSON.stringify(body),
+    options: { responseCode: code },
+  },
+});
+
+const link = (...targets) => ({ main: targets.map((t) => (t ? [t].flat().map((n) => ({ node: n, type: "main", index: 0 })) : [])) });
+
+// ---------------------------------------------------------------- 1. Request notifications
+const NOTIFY = "lendloopNotify01";
+const notify = {
+  id: NOTIFY,
+  name: "LendLoop – Request notifications",
+  active: false,
+  settings: settings(),
+  tags: [],
+  pinData: {},
+  nodes: [
+    {
+      id: uuid(`${NOTIFY}:Webhook`),
+      name: "Convex webhook",
+      type: "n8n-nodes-base.webhook",
+      typeVersion: 2,
+      position: [0, 300],
+      webhookId: uuid(`${NOTIFY}:webhookId`),
+      parameters: { httpMethod: "POST", path: "lendloop-request-events", responseMode: "responseNode", options: {} },
+    },
+    codeNode(NOTIFY, "Verify signature", "notify-verify.js", [220, 300]),
+    ifNode(NOTIFY, "Signature valid?", "={{ $json.valid }}", [440, 300]),
+    respond(NOTIFY, "Reject (401)", 401, { error: "invalid signature" }, [660, 500]),
+    {
+      id: uuid(`${NOTIFY}:Stop`),
+      name: "Flag rejected call",
+      type: "n8n-nodes-base.stopAndError",
+      typeVersion: 1,
+      position: [880, 500],
+      parameters: { errorMessage: "={{ 'Rejected webhook call: ' + $('Verify signature').first().json.reason }}" },
+    },
+    respond(NOTIFY, "Accept (202)", 202, { accepted: true }, [660, 200]),
+    ifNode(NOTIFY, "Already delivered?", "={{ $json.duplicate }}", [880, 200]),
+    codeNode(NOTIFY, "Send notification (mock)", "notify-send.js", [1100, 300]),
+    codeNode(NOTIFY, "Sign write-back", "sign-writeback.js", [1320, 300]),
+    signedPost(NOTIFY, "Confirm to LendLoop", "/n8n/notification-status", [1540, 300]),
+  ],
+  connections: {
+    "Convex webhook": link("Verify signature"),
+    "Verify signature": link("Signature valid?"),
+    "Signature valid?": link("Accept (202)", "Reject (401)"),
+    "Reject (401)": link("Flag rejected call"),
+    "Accept (202)": link("Already delivered?"),
+    "Already delivered?": link(null, "Send notification (mock)"),
+    "Send notification (mock)": link("Sign write-back"),
+    "Sign write-back": link("Confirm to LendLoop"),
+  },
+};
+
+// ---------------------------------------------------------------- 2. Overdue reminders
+const REMIND = "lendloopRemind01";
+const remind = {
+  id: REMIND,
+  name: "LendLoop – Daily overdue reminders",
+  active: false,
+  settings: settings(),
+  tags: [],
+  pinData: {},
+  nodes: [
+    {
+      id: uuid(`${REMIND}:Schedule`),
+      name: "Every day 09:00",
+      type: "n8n-nodes-base.scheduleTrigger",
+      typeVersion: 1.2,
+      position: [0, 300],
+      parameters: { rule: { interval: [{ field: "cronExpression", expression: "0 9 * * *" }] } },
+    },
+    codeNode(REMIND, "Sign request", "remind-sign-fetch.js", [220, 300]),
+    signedPost(REMIND, "Fetch overdue loans", "/n8n/overdue-loans", [440, 300]),
+    codeNode(REMIND, "Split loans", "remind-split.js", [660, 300]),
+    codeNode(REMIND, "Send reminder (mock)", "remind-send.js", [880, 300], { mode: "runOnceForEachItem" }),
+    codeNode(REMIND, "Sign write-back", "sign-writeback.js", [1100, 300]),
+    signedPost(REMIND, "Record reminder in LendLoop", "/n8n/reminder-status", [1320, 300]),
+  ],
+  connections: {
+    "Every day 09:00": link("Sign request"),
+    "Sign request": link("Fetch overdue loans"),
+    "Fetch overdue loans": link("Split loans"),
+    "Split loans": link("Send reminder (mock)"),
+    "Send reminder (mock)": link("Sign write-back"),
+    "Sign write-back": link("Record reminder in LendLoop"),
+  },
+};
+
+// ---------------------------------------------------------------- 3. Error handler
+const errors = {
+  id: ERROR_WORKFLOW_ID,
+  name: "LendLoop – Error handler",
+  active: false,
+  settings: settings(false), // must not point at itself
+  tags: [],
+  pinData: {},
+  nodes: [
+    {
+      id: uuid(`${ERROR_WORKFLOW_ID}:Trigger`),
+      name: "On workflow error",
+      type: "n8n-nodes-base.errorTrigger",
+      typeVersion: 1,
+      position: [0, 300],
+      parameters: {},
+    },
+    codeNode(ERROR_WORKFLOW_ID, "Build signed report", "error-report.js", [220, 300]),
+    signedPost(ERROR_WORKFLOW_ID, "Report to LendLoop", "/n8n/workflow-error", [440, 300]),
+  ],
+  connections: {
+    "On workflow error": link("Build signed report"),
+    "Build signed report": link("Report to LendLoop"),
+  },
+};
+
+const out = join(root, "workflows");
+mkdirSync(out, { recursive: true });
+for (const [file, wf] of [
+  ["request-notifications.json", notify],
+  ["overdue-reminders.json", remind],
+  ["error-handler.json", errors],
+]) {
+  writeFileSync(join(out, file), JSON.stringify(wf, null, 2) + "\n");
+  console.log(`wrote workflows/${file}`);
+}
