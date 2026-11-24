@@ -3,6 +3,7 @@
 import { api } from "@convex/_generated/api";
 import type { LoanStatus } from "@convex/lib/validators";
 import { useMutation } from "convex/react";
+import type { FunctionReturnType } from "convex/server";
 import { useSessionQuery } from "@/components/DashboardSession";
 import { useState } from "react";
 import { ActionButton, LoanCard } from "@/components/LoanCard";
@@ -82,6 +83,8 @@ function Listings() {
   );
 }
 
+type Member = FunctionReturnType<typeof api.users.listForAdmin>[number];
+
 function Members() {
   const users = useSessionQuery(api.users.listForAdmin);
   const setTrusted = useMutation(api.users.setTrustedLender);
@@ -96,20 +99,85 @@ function Members() {
                 <span className="font-medium">{u.name}</span>{" "}
                 <span className="text-stone-500">{u.email}</span>
                 {u.role === "admin" && (
-                  <span className="ml-2 rounded-full bg-stone-800 px-2 py-0.5 text-xs text-white">admin</span>
+                  <span
+                    className="ml-2 rounded-full bg-stone-800 px-2 py-0.5 text-xs text-white"
+                    title={u.pinnedAdmin ? "Admin via the ADMIN_EMAILS setting" : undefined}
+                  >
+                    admin{u.pinnedAdmin ? " · allow-list" : ""}
+                  </span>
                 )}
+                {u.isMe && <span className="ml-2 text-xs text-stone-400">(you)</span>}
               </span>
-              <ActionButton
-                className={u.trustedLender ? "btn-secondary" : "btn-primary"}
-                onClick={() => setTrusted({ userId: u._id, trusted: !u.trustedLender })}
-              >
-                {u.trustedLender ? "★ Remove Trusted Lender" : "Mark Trusted Lender"}
-              </ActionButton>
+              <span className="flex flex-wrap items-center gap-2">
+                <AdminRoleControl member={u} />
+                <ActionButton
+                  className={u.trustedLender ? "btn-secondary" : "btn-primary"}
+                  onClick={() => setTrusted({ userId: u._id, trusted: !u.trustedLender })}
+                >
+                  {u.trustedLender ? "★ Remove Trusted Lender" : "Mark Trusted Lender"}
+                </ActionButton>
+              </span>
             </li>
           ))}
         </ul>
       )}
     </section>
+  );
+}
+
+/**
+ * Make admin / Remove admin with an inline confirmation. The server enforces the
+ * same rules (no self-change, allow-listed admins can't be removed here); the UI
+ * just explains them up front.
+ */
+function AdminRoleControl({ member }: { member: Member }) {
+  const setAdmin = useMutation(api.users.setAdmin);
+  const [confirming, setConfirming] = useState(false);
+  const isAdmin = member.role === "admin";
+
+  if (member.isMe) {
+    return (
+      <button className="btn-secondary" disabled title="You can't change your own admin role.">
+        Remove admin
+      </button>
+    );
+  }
+  if (isAdmin && member.pinnedAdmin) {
+    return (
+      <button
+        className="btn-secondary"
+        disabled
+        title="Admin via ADMIN_EMAILS. Remove them from that setting in the Convex dashboard first."
+      >
+        Remove admin
+      </button>
+    );
+  }
+  if (!confirming) {
+    return (
+      <button className={isAdmin ? "btn-danger" : "btn-secondary"} onClick={() => setConfirming(true)}>
+        {isAdmin ? "Remove admin" : "Make admin"}
+      </button>
+    );
+  }
+  return (
+    <span className="flex items-center gap-2">
+      <span className="text-stone-600">
+        {isAdmin ? `Remove admin from ${member.name}?` : `Make ${member.name} an admin?`}
+      </span>
+      <ActionButton
+        className={isAdmin ? "btn-danger" : "btn-primary"}
+        onClick={async () => {
+          await setAdmin({ userId: member._id, admin: !isAdmin });
+          setConfirming(false);
+        }}
+      >
+        Yes
+      </ActionButton>
+      <button className="btn-secondary" onClick={() => setConfirming(false)}>
+        Cancel
+      </button>
+    </span>
   );
 }
 

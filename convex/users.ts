@@ -94,7 +94,8 @@ export const me = query({
 export const listForAdmin = query({
   args: {},
   handler: async (ctx) => {
-    await requireAdmin(ctx);
+    const me = await requireAdmin(ctx);
+    const pinned = adminEmails();
     const users = await ctx.db.query("users").take(500);
     return users.map((u) => ({
       _id: u._id,
@@ -102,7 +103,38 @@ export const listForAdmin = query({
       email: u.email,
       role: u.role,
       trustedLender: u.trustedLender,
+      isMe: u._id === me._id,
+      // Admin granted by the ADMIN_EMAILS allow-list (re-applied on every visit).
+      pinnedAdmin: !!u.email && pinned.has(u.email),
     }));
+  },
+});
+
+/**
+ * Admin: grant or revoke admin for another member.
+ * Guardrails (server-enforced):
+ *  - you can't change your own role, so the acting admin always remains and
+ *    there is always at least one admin;
+ *  - admins listed in ADMIN_EMAILS can't be demoted here (they'd be re-promoted
+ *    on their next visit), so the allow-list stays the source of truth for them.
+ */
+export const setAdmin = mutation({
+  args: { userId: v.id("users"), admin: v.boolean() },
+  handler: async (ctx, { userId, admin }) => {
+    const me = await requireAdmin(ctx);
+    if (userId === me._id) {
+      throw new ConvexError({ code: "BAD_REQUEST", message: "You can't change your own admin role." });
+    }
+    const target = await ctx.db.get(userId);
+    if (!target) throw new ConvexError({ code: "NOT_FOUND", message: "User not found." });
+    if (!admin && target.email && adminEmails().has(target.email)) {
+      throw new ConvexError({
+        code: "BAD_REQUEST",
+        message: `${target.name} is an admin via ADMIN_EMAILS. Remove them from that list first.`,
+      });
+    }
+    const role = admin ? "admin" : "user";
+    if (target.role !== role) await ctx.db.patch(userId, { role });
   },
 });
 
