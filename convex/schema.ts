@@ -66,6 +66,17 @@ export default defineSchema({
     idempotencyKey: v.string(),
     attempts: v.number(),
     detail: v.optional(v.string()),
+    // Per-channel delivery results reported by n8n (email, slack, discord, mock).
+    channels: v.optional(
+      v.record(
+        v.string(),
+        v.object({
+          status: v.union(v.literal("sent"), v.literal("failed")),
+          detail: v.optional(v.string()),
+          at: v.number(),
+        }),
+      ),
+    ),
     updatedAt: v.number(),
   })
     .index("by_key", ["idempotencyKey"])

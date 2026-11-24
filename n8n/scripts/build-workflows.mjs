@@ -107,29 +107,59 @@ const respond = (wf, name, code, body, position) => ({
 const link = (...targets) => ({ main: targets.map((t) => (t ? [t].flat().map((n) => ({ node: n, type: "main", index: 0 })) : [])) });
 
 
-const SMTP_CREDENTIAL = { id: "lendloopSmtp0001", name: "LendLoop SMTP" };
+// Credentials are referenced by fixed id/name only; secrets live in n8n's
+// encrypted credential store (see n8n/scripts/credentials.js).
+const CREDENTIALS = {
+  smtp: { id: "lendloopSmtp0001", name: "LendLoop SMTP" },
+  slackApi: { id: "lendloopSlack001", name: "LendLoop Slack bot" },
+  discordWebhookApi: { id: "lendloopDiscord1", name: "LendLoop Discord webhook" },
+};
+
+/** Call errors go to the node's error output (→ "Mark failed") after retries. */
+const resilient = { retryOnFail: true, maxTries: 3, waitBetweenTries: 5000, onError: "continueErrorOutput" };
+
+const slackApi = (wf, name, method, url, extra, position) => ({
+  id: uuid(`${wf}:${name}`),
+  name,
+  type: "n8n-nodes-base.httpRequest",
+  typeVersion: 4.2,
+  position,
+  ...resilient,
+  parameters: {
+    method,
+    url,
+    authentication: "predefinedCredentialType",
+    nodeCredentialType: "slackApi",
+    ...extra,
+    options: { timeout: 10000 },
+  },
+  credentials: { slackApi: CREDENTIALS.slackApi },
+});
+
+const channelIs = (wf, channel, position) =>
+  ifNode(wf, `${channel[0].toUpperCase()}${channel.slice(1)}?`, `={{ $json.channel === '${channel}' }}`, position);
 
 /**
- * Shared delivery stage (after a "Compose message" node that outputs
- * {ref, to, subject, text, problem}). LENDLOOP_NOTIFY_MODE=email sends via
- * SMTP (credential stored in n8n, referenced by id/name only); anything else
- * logs a mock message. Every path ends in a {…ref, status} write-back item.
+ * Shared delivery stage after a "Plan deliveries" node that emits one item per
+ * channel: {ref, channel, to, subject, text, slackText, discordText, problem}.
+ * Every path ends in a {…ref, status, channel, detail?} write-back item, so each
+ * channel's outcome is recorded separately in LendLoop.
  */
 function delivery(wf, x, y, next) {
   const each = { mode: "runOnceForEachItem" };
   const nodes = [
     ifNode(wf, "Can send?", "={{ !$json.problem }}", [x, y]),
-    ifNode(wf, "Email mode?", "={{ $env.LENDLOOP_NOTIFY_MODE === 'email' }}", [x + 220, y - 100]),
+    channelIs(wf, "email", [x + 220, y - 300]),
+    channelIs(wf, "slack", [x + 440, y - 100]),
+    channelIs(wf, "discord", [x + 660, y + 100]),
+    // email
     {
       id: uuid(`${wf}:Send email`),
       name: "Send email",
       type: "n8n-nodes-base.emailSend",
       typeVersion: 2.1,
-      position: [x + 440, y - 200],
-      retryOnFail: true,
-      maxTries: 3,
-      waitBetweenTries: 5000,
-      onError: "continueErrorOutput",
+      position: [x + 660, y - 400],
+      ...resilient,
       parameters: {
         fromEmail: "={{ $env.LENDLOOP_MAIL_FROM }}",
         toEmail: "={{ $json.to }}",
@@ -138,16 +168,60 @@ function delivery(wf, x, y, next) {
         text: "={{ $json.text }}",
         options: { appendAttribution: false },
       },
-      credentials: { smtp: SMTP_CREDENTIAL },
+      credentials: { smtp: CREDENTIALS.smtp },
     },
-    codeNode(wf, "Send (mock)", "send-mock.js", [x + 440, y], each),
-    codeNode(wf, "Mark sent", "mark-sent.js", [x + 660, y - 260], each),
-    codeNode(wf, "Mark failed", "mark-failed.js", [x + 660, y + 120], each),
+    // slack: look the person up by email, then DM them from the app
+    slackApi(
+      wf,
+      "Find Slack user",
+      "GET",
+      "https://slack.com/api/users.lookupByEmail",
+      { sendQuery: true, queryParameters: { parameters: [{ name: "email", value: "={{ $json.to }}" }] } },
+      [x + 880, y - 200],
+    ),
+    codeNode(wf, "Slack user found?", "slack-target.js", [x + 1100, y - 200], each),
+    ifNode(wf, "In workspace?", "={{ $json.found }}", [x + 1320, y - 200]),
+    slackApi(
+      wf,
+      "Send Slack DM",
+      "POST",
+      "https://slack.com/api/chat.postMessage",
+      {
+        sendBody: true,
+        specifyBody: "json",
+        jsonBody: "={{ JSON.stringify({ channel: $json.slackUser, text: $json.slackText, unfurl_links: false }) }}",
+      },
+      [x + 1540, y - 260],
+    ),
+    codeNode(wf, "Slack result", "slack-result.js", [x + 1760, y - 260], each),
+    // discord: anonymized post to a channel via webhook credential
+    {
+      id: uuid(`${wf}:Post to Discord`),
+      name: "Post to Discord",
+      type: "n8n-nodes-base.discord",
+      typeVersion: 2,
+      position: [x + 880, y + 100],
+      ...resilient,
+      parameters: { authentication: "webhook", content: "={{ $json.discordText }}", options: {} },
+      credentials: { discordWebhookApi: CREDENTIALS.discordWebhookApi },
+    },
+    // mock
+    codeNode(wf, "Send (mock)", "send-mock.js", [x + 880, y + 300], each),
+    codeNode(wf, "Mark sent", "mark-sent.js", [x + 1980, y - 400], each),
+    codeNode(wf, "Mark failed", "mark-failed.js", [x + 1980, y + 300], each),
   ];
   const connections = {
-    "Can send?": link("Email mode?", "Mark failed"),
-    "Email mode?": link("Send email", "Send (mock)"),
+    "Can send?": link("Email?", "Mark failed"),
+    "Email?": link("Send email", "Slack?"),
+    "Slack?": link("Find Slack user", "Discord?"),
+    "Discord?": link("Post to Discord", "Send (mock)"),
     "Send email": link("Mark sent", "Mark failed"),
+    "Find Slack user": link("Slack user found?", "Mark failed"),
+    "Slack user found?": link("In workspace?"),
+    "In workspace?": link("Send Slack DM", "Mark failed"),
+    "Send Slack DM": link("Slack result", "Mark failed"),
+    "Post to Discord": link("Mark sent", "Mark failed"),
+    "Slack result": link(next),
     "Send (mock)": link(next),
     "Mark sent": link(next),
     "Mark failed": link(next),
@@ -188,10 +262,10 @@ const notify = {
     },
     respond(NOTIFY, "Accept (202)", 202, { accepted: true }, [660, 200]),
     ifNode(NOTIFY, "Already delivered?", "={{ $json.duplicate }}", [880, 200]),
-    codeNode(NOTIFY, "Compose message", "notify-compose.js", [1100, 300]),
+    codeNode(NOTIFY, "Plan deliveries", "notify-plan.js", [1100, 300]),
     ...notifyDelivery.nodes,
-    codeNode(NOTIFY, "Sign write-back", "sign-writeback.js", [2200, 300]),
-    signedPost(NOTIFY, "Confirm to LendLoop", "/n8n/notification-status", [2420, 300]),
+    codeNode(NOTIFY, "Sign write-back", "sign-writeback.js", [3520, 300]),
+    signedPost(NOTIFY, "Confirm to LendLoop", "/n8n/notification-status", [3740, 300]),
   ],
   connections: {
     "Convex webhook": link("Verify signature"),
@@ -199,8 +273,8 @@ const notify = {
     "Signature valid?": link("Accept (202)", "Reject (401)"),
     "Reject (401)": link("Flag rejected call"),
     "Accept (202)": link("Already delivered?"),
-    "Already delivered?": link(null, "Compose message"),
-    "Compose message": link("Can send?"),
+    "Already delivered?": link(null, "Plan deliveries"),
+    "Plan deliveries": link("Can send?"),
     ...notifyDelivery.connections,
     "Sign write-back": link("Confirm to LendLoop"),
   },
@@ -237,18 +311,18 @@ const remind = {
     codeNode(REMIND, "Sign request", "remind-sign-fetch.js", [220, 300]),
     signedPost(REMIND, "Fetch overdue loans", "/n8n/overdue-loans", [440, 300]),
     codeNode(REMIND, "Split loans", "remind-split.js", [660, 300]),
-    codeNode(REMIND, "Compose message", "remind-compose.js", [880, 300], { mode: "runOnceForEachItem" }),
+    codeNode(REMIND, "Plan deliveries", "remind-plan.js", [880, 300]),
     ...remindDelivery.nodes,
-    codeNode(REMIND, "Sign write-back", "sign-writeback.js", [1980, 300]),
-    signedPost(REMIND, "Record reminder in LendLoop", "/n8n/reminder-status", [2200, 300]),
+    codeNode(REMIND, "Sign write-back", "sign-writeback.js", [3300, 300]),
+    signedPost(REMIND, "Record reminder in LendLoop", "/n8n/reminder-status", [3520, 300]),
   ],
   connections: {
     "Every day 09:00": link("Sign request"),
     "Run now (manual)": link("Sign request"),
     "Sign request": link("Fetch overdue loans"),
     "Fetch overdue loans": link("Split loans"),
-    "Split loans": link("Compose message"),
-    "Compose message": link("Can send?"),
+    "Split loans": link("Plan deliveries"),
+    "Plan deliveries": link("Can send?"),
     ...remindDelivery.connections,
     "Sign write-back": link("Record reminder in LendLoop"),
   },

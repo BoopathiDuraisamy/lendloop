@@ -41,7 +41,7 @@ yarn-error.log*
 next-env.d.ts
 !.env.example
 !n8n/.env.example
-!n8n/smtp.env.example
+!n8n/secrets.env.example
 
 # convex local/anonymous deployment state
 /.convex
@@ -49,5 +49,6 @@ next-env.d.ts
 # local brief, not part of the repo
 /note.txt
 
-# SMTP login for the n8n credential importer (contains a password)
+# Notification secrets for the n8n credential importer (passwords, tokens)
+/n8n/secrets.env
 /n8n/smtp.env

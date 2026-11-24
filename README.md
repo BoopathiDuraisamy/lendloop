@@ -113,12 +113,12 @@ The signature covers the exact payload **string**, so neither side has to re-ser
 
 1. A Convex mutation (request / approve / decline / cancel / return) writes an `automationEvents` row (key `notify:<loanId>:<event>`) **in the same transaction** and schedules `n8n.deliverRequestEvent`. This is a transactional outbox: no status change without its notification, and no notification for a rolled-back change.
 2. The action builds a **minimal payload**: recipient name and email, tool name, dates, status, a link. Other users' ids, notes and descriptions are left out. It signs and POSTs to the n8n webhook, retrying with exponential backoff (5s → 40s, 5 attempts) on network errors, 5xx and 429. A permanent failure is recorded as `failed`, shown on the loan, and listed in Admin.
-3. In n8n: **Webhook → Verify signature** (HMAC, timestamp; de-dupes by `eventId` using workflow static data) **→ 202 response → Compose → Send (email or mock) → Sign → POST `/n8n/notification-status`** (retries 4×).
+3. In n8n: **Webhook → Verify signature** (HMAC, timestamp; de-dupes by `eventId` using workflow static data) **→ 202 response → Plan deliveries (one item per channel) → email / Slack DM / Discord feed / mock → Sign → POST `/n8n/notification-status`** (retries 4×).
    Invalid signatures get a 401 and the run is marked failed (*Stop and Error*), so the error workflow reports it.
 
 ### Workflow 2 – Daily overdue reminders (`n8n/workflows/overdue-reminders.json`)
 
-**Schedule (09:00) → Sign → POST `/n8n/overdue-loans` → split → Compose → Send (email or mock), once per loan → Sign → POST `/n8n/reminder-status`**
+**Schedule (09:00) → Sign → POST `/n8n/overdue-loans` → split → Plan deliveries (email / Slack DM / mock, never Discord) → Sign → POST `/n8n/reminder-status`**
 
 - Convex returns only approved loans past `endDate` that have **not already been reminded today**, each with a `reminderKey = overdue:<loanId>:<YYYY-MM-DD>`.
 - The write-back is **idempotent on `reminderKey`**. A retried or re-run write-back returns `{duplicate: true}` and does not create a second row or increment `reminderCount`. A `failed` reminder can later be upgraded to `sent`.
@@ -210,18 +210,25 @@ npx convex env set N8N_REQUEST_WEBHOOK_URL https://<that-host>/webhook/lendloop-
 A quick-tunnel URL changes whenever the `tunnel` container restarts, and Cloudflare may expire it. Run
 `npm run tunnel:refresh` to get a new one and update Convex, or use a named Cloudflare tunnel or n8n Cloud for a stable URL.
 
-**Real email (optional).** Notifications are mock-logged by default. To send real email:
-1. `cp n8n/smtp.env.example n8n/smtp.env` and fill in your SMTP login. For Gmail, create an
-   [App Password](https://myaccount.google.com/apppasswords) (requires 2-Step Verification).
-2. `docker compose run --rm n8n-smtp` stores it as the encrypted n8n credential **LendLoop SMTP**.
-   `smtp.env` is git-ignored and only given to this one-shot container. The running n8n never has the
-   password in its environment, so workflow code can't read it.
-3. In `n8n/.env` set `LENDLOOP_NOTIFY_MODE=email` and `LENDLOOP_MAIL_FROM=LendLoop <you@gmail.com>`,
-   then `docker compose up -d n8n`.
+**Notification channels.** Set `LENDLOOP_NOTIFY_CHANNELS` in `n8n/.env` (comma-separated), then `docker compose up -d n8n`:
 
-Send failures are retried 3× and then written back as `failed`, so the loan shows e.g.
-"Notification failed: Invalid login". `n8n-import` creates a placeholder credential so workflows can be
-published in mock mode, because n8n won't publish a workflow whose credential is missing.
+| Channel | Who sees it | Content | Needs |
+|---|---|---|---|
+| `email` | the affected person | full message + link | SMTP login (e.g. Gmail App Password) |
+| `slack` | the affected person, as a **private DM** found by their LendLoop email | full message + link | Slack app bot token (`chat:write`, `users:read`, `users:read.email`) |
+| `discord` | everyone in one channel | **anonymized**: tool + dates only. Only new requests, loans and returns; no declines, cancellations or overdue reminders | channel webhook URL |
+| `mock` | nobody (logged, emails masked) | n/a | nothing (default) |
+
+Secrets go in `n8n/secrets.env` (copy `n8n/secrets.env.example`, git-ignored), then run
+`docker compose run --rm n8n-credentials`. It stores them as encrypted n8n credentials (**LendLoop SMTP**,
+**LendLoop Slack bot**, **LendLoop Discord webhook**). `secrets.env` is only given to that one-shot container, so the
+running n8n never has passwords or tokens in its environment, and workflow JSON references credentials by id only.
+
+Each channel's result is written back separately and shown on the loan, e.g.
+"Notification sent via email, slack · discord failed: …". Sends retry 3×. Some nodes (Discord) report failures as
+normal output items, so the "Mark sent" step checks every item for an `error` before recording success.
+`n8n-import` creates placeholder credentials for anything not yet configured, because n8n won't publish a workflow
+that references a missing credential. Placeholder sends fail visibly.
 
 **Tunnel URL changed / notifications failing with network errors?** Free quick tunnels can expire.
 `npm run tunnel:refresh` (Node 22+) restarts the tunnel and updates Convex automatically.
@@ -265,9 +272,9 @@ Sign in with the email from `ADMIN_EMAILS` to see the Admin tab. Use a second ac
 | `n8n/.env` | `LENDLOOP_HMAC_SECRET` | same value as `N8N_WEBHOOK_SECRET` |
 | `n8n/.env` | `LENDLOOP_CONVEX_SITE_URL` | Convex HTTP actions base URL (`…convex.site` or `:3211` locally) |
 | `n8n/.env` | `N8N_ENCRYPTION_KEY` | encrypts n8n credentials at rest |
-| `n8n/.env` | `LENDLOOP_NOTIFY_MODE` | `mock` (default) or `email` |
+| `n8n/.env` | `LENDLOOP_NOTIFY_CHANNELS` | any of `email,slack,discord,mock` (default `mock`) |
 | `n8n/.env` | `LENDLOOP_MAIL_FROM` | sender, e.g. `LendLoop <you@gmail.com>` |
-| `n8n/smtp.env` | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` | read only by `n8n-smtp` to create the encrypted credential |
+| `n8n/secrets.env` | `SMTP_*`, `SLACK_BOT_TOKEN`, `DISCORD_WEBHOOK_URL` | read only by `n8n-credentials` to create encrypted n8n credentials |
 
 ---
 
@@ -276,7 +283,8 @@ Sign in with the email from `ADMIN_EMAILS` to see the Admin tab. Use a second ac
 - **Public page shows name + category only.** `tools.listPublic` returns nothing else: no owner, description or availability.
 - **Signed-in views show display names, never contact details.** Emails are visible only to admins and to the n8n notification payload for the single recipient.
 - **n8n gets the minimum.** One recipient's name and email, the tool name, the dates and the status. No other user ids, notes or descriptions. The overdue feed is the same: borrower name and email, tool, due date.
-- **Mock channel masks emails in logs** (`j***@example.com`). Real email uses an n8n SMTP credential (encrypted at rest). The SMTP password is never in workflow JSON or the n8n container's environment.
+- **Per-channel minimization.** Email and Slack are private to the affected person. Discord is a shared channel, so it gets an anonymized feed (tool + dates, no names or emails) and never gets overdue reminders. Mock logs mask emails (`j***@example.com`).
+- **Channel secrets** (SMTP password, Slack token, Discord webhook URL) live only in n8n's encrypted credential store: never in workflow JSON, git, or the running n8n's environment.
 - **Identity comes from the verified JWT**, and the user row is keyed by `tokenIdentifier`. Name and email are fetched server-to-server from Clerk's Backend API (or taken from token claims if configured), never from client arguments. Admin requires an email in `ADMIN_EMAILS` that Clerk reports as **verified**.
 - **HMAC both ways**, with timestamped replay protection, constant-time comparison, a generic 401, a 16 KB body cap and per-field validation on every inbound payload.
 - **Idempotency everywhere it matters.** Outbound events are keyed `notify:<loan>:<event>`, and n8n also de-dupes by `eventId`. Reminders are keyed `overdue:<loan>:<date>` and errors `n8n-error:<executionId>`.

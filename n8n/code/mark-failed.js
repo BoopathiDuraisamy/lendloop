@@ -1,6 +1,7 @@
-// Couldn't deliver this item (no email on file, or SMTP failed after retries).
-// Reported to LendLoop as "failed" so it's visible on the loan. Runs once per item.
-const m = $('Compose message').item.json;
+// A channel couldn't deliver this item (no email, not in Slack, API/SMTP error
+// after retries). Reported as "failed" for that channel so it's visible on the loan.
+const p = $('Plan deliveries').item.json;
 const err = $json.error;
-const detail = m.problem || (err && (err.message || err.description)) || (typeof err === 'string' ? err : 'send failed');
-return { json: { ...m.ref, status: 'failed', channel: m.problem ? 'none' : 'email', detail: String(detail).slice(0, 250) } };
+const detail =
+  $json.problem || p.problem || (err && (err.message || err.description)) || (typeof err === 'string' ? err : 'send failed');
+return { json: { ...p.ref, status: 'failed', channel: p.channel, detail: String(detail).slice(0, 250) } };

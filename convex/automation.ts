@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, internalQuery, query } from "./_generated/server";
 import { requireAdmin } from "./lib/auth";
 import { daysBetween, todayUtc } from "./lib/dates";
@@ -80,7 +80,41 @@ export const recordOutbound = internalMutation({
 
 type WriteBackResult = { ok: true; duplicate: boolean } | { ok: false; error: string };
 
-/** n8n confirms a request notification was delivered (or not). Idempotent on eventId. */
+type ChannelResults = NonNullable<Doc<"automationEvents">["channels"]>;
+
+const CHANNEL_RE = /^[a-z][a-z-]{0,19}$/;
+
+/**
+ * Merge one channel's outcome into an event's per-channel results.
+ * - Idempotent: the same (channel, status) again is reported as a duplicate.
+ * - A channel that already succeeded stays "sent" (a late failure can't downgrade it).
+ * - Overall status is "sent" if any channel delivered, else "failed".
+ */
+function mergeChannel(
+  current: ChannelResults | undefined,
+  channelRaw: string | undefined,
+  status: "sent" | "failed",
+  detail: string | undefined,
+  label: string,
+) {
+  const channel = channelRaw && CHANNEL_RE.test(channelRaw) ? channelRaw : "unknown";
+  const channels: ChannelResults = { ...(current ?? {}) };
+  const prev = channels[channel];
+  if (prev && (prev.status === status || prev.status === "sent")) {
+    return { duplicate: true as const };
+  }
+  channels[channel] = { status, detail: clip(detail), at: Date.now() };
+
+  const entries = Object.entries(channels);
+  const sent = entries.filter(([, r]) => r.status === "sent").map(([c]) => c);
+  const failed = entries.filter(([, r]) => r.status === "failed");
+  const overall: "sent" | "failed" = sent.length ? "sent" : "failed";
+  const parts = [sent.length ? `${label} sent via ${sent.join(", ")}` : `${label} failed`];
+  for (const [c, r] of failed) parts.push(`${c} failed: ${r.detail ?? "unknown"}`);
+  return { duplicate: false as const, channels, overall, detail: clip(parts.join(" · "))! };
+}
+
+/** n8n reports one channel's delivery of a request notification. Idempotent per (eventId, channel). */
 export const confirmNotification = internalMutation({
   args: {
     eventId: v.string(),
@@ -94,13 +128,12 @@ export const confirmNotification = internalMutation({
       .withIndex("by_key", (q) => q.eq("idempotencyKey", eventId))
       .unique();
     if (!ev || ev.kind !== "request_notification") return { ok: false, error: "unknown eventId" };
-    if (ev.status === "sent") return { ok: true, duplicate: true }; // terminal
-    if (ev.status === status && status === "failed") return { ok: true, duplicate: true };
+    const merged = mergeChannel(ev.channels, channel, status, detail, "Notification");
+    if (merged.duplicate) return { ok: true, duplicate: true };
     await ctx.db.patch(ev._id, {
-      status,
-      detail: clip(
-        status === "sent" ? `Notification sent${channel ? ` via ${channel}` : ""}` : `Notification failed: ${detail ?? "unknown"}`,
-      ),
+      status: merged.overall,
+      channels: merged.channels,
+      detail: merged.detail,
       updatedAt: Date.now(),
     });
     return { ok: true, duplicate: false };
@@ -162,36 +195,37 @@ export const recordReminder = internalMutation({
     if (!loan) return { ok: false, error: "unknown loanId" };
 
     const now = Date.now();
-    const detail = clip(
-      args.status === "sent"
-        ? `Overdue reminder sent${args.channel ? ` via ${args.channel}` : ""}`
-        : `Overdue reminder failed: ${args.detail ?? "unknown"}`,
-    );
     const existing = await ctx.db
       .query("automationEvents")
       .withIndex("by_key", (q) => q.eq("idempotencyKey", args.reminderKey))
       .unique();
 
+    const merged = mergeChannel(existing?.channels, args.channel, args.status, args.detail, "Overdue reminder");
+    if (merged.duplicate) return { ok: true, duplicate: true };
+
+    const wasSent = existing?.status === "sent";
     if (existing) {
-      if (existing.status === "sent" || existing.status === args.status) return { ok: true, duplicate: true };
       await ctx.db.patch(existing._id, {
-        status: args.status,
+        status: merged.overall,
+        channels: merged.channels,
         attempts: existing.attempts + 1,
-        detail,
+        detail: merged.detail,
         updatedAt: now,
       });
     } else {
       await ctx.db.insert("automationEvents", {
         loanId,
         kind: "overdue_reminder",
-        status: args.status,
+        status: merged.overall,
+        channels: merged.channels,
         idempotencyKey: args.reminderKey,
         attempts: 1,
-        detail,
+        detail: merged.detail,
         updatedAt: now,
       });
     }
-    if (args.status === "sent") {
+    // Count one reminder per loan per day, however many channels delivered it.
+    if (merged.overall === "sent" && !wasSent) {
       await ctx.db.patch(loanId, { reminderCount: loan.reminderCount + 1, lastReminderAt: now });
     }
     return { ok: true, duplicate: false };

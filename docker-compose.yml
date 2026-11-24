@@ -31,25 +31,18 @@ services:
     volumes:
       - n8n_data:/home/node/.n8n
 
-  # One-shot importer (doesn't start with `up`). Re-running overwrites workflows by id.
-  # Also creates a placeholder "LendLoop SMTP" credential if none exists yet, because
-  # n8n refuses to publish workflows that reference a missing credential.
+  # One-shot importer (doesn't start with `up`). Re-running overwrites workflows by id
+  # (and unpublishes them: publish again afterwards). Also creates placeholder
+  # credentials if missing, because n8n won't publish workflows that reference them.
   n8n-import:
     image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-latest}
     profiles: ["tools"]
     env_file: n8n/.env
-    entrypoint:
-      - sh
-      - -c
-      - >-
-        n8n import:workflow --separate --input=/workflows &&
-        (n8n export:credentials --id=lendloopSmtp0001 --output=/tmp/existing.json >/dev/null 2>&1 && echo "SMTP credential exists, keeping it" ||
-        (node /scripts/smtp-credential.js --placeholder > /tmp/smtp.json && n8n import:credentials --input=/tmp/smtp.json && echo "Created placeholder SMTP credential"));
-        rc=$$?; rm -f /tmp/smtp.json /tmp/existing.json; exit $$rc
+    entrypoint: ["sh", "-c", "n8n import:workflow --separate --input=/workflows && node /scripts/credentials.js"]
     volumes:
       - n8n_data:/home/node/.n8n
       - ./n8n/workflows:/workflows:ro
-      - ./n8n/scripts/smtp-credential.js:/scripts/smtp-credential.js:ro
+      - ./n8n/scripts/credentials.js:/scripts/credentials.js:ro
 
   # Allow-lists the single webhook path; everything else returns 404.
   webhook-proxy:
@@ -69,19 +62,16 @@ services:
     depends_on: [webhook-proxy]
     command: tunnel --no-autoupdate --url http://webhook-proxy:8080
 
-  # One-shot: store the SMTP login from n8n/smtp.env as the encrypted "LendLoop SMTP"
-  # credential. smtp.env is only given to this container, never to the running n8n.
-  n8n-smtp:
+  # One-shot: store SMTP / Slack / Discord secrets from n8n/secrets.env as encrypted
+  # n8n credentials. secrets.env is only given to this container, never to the running n8n.
+  n8n-credentials:
     image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-latest}
     profiles: ["tools"]
-    env_file: [n8n/.env, n8n/smtp.env]
-    entrypoint:
-      - sh
-      - -c
-      - node /scripts/smtp-credential.js > /tmp/smtp.json && n8n import:credentials --input=/tmp/smtp.json; rc=$$?; rm -f /tmp/smtp.json; exit $$rc
+    env_file: [n8n/.env, n8n/secrets.env]
+    entrypoint: ["node", "/scripts/credentials.js"]
     volumes:
       - n8n_data:/home/node/.n8n
-      - ./n8n/scripts/smtp-credential.js:/scripts/smtp-credential.js:ro
+      - ./n8n/scripts/credentials.js:/scripts/credentials.js:ro
 
 volumes:
   n8n_data:

@@ -31,6 +31,17 @@ function verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300)
   return JSON.parse(payload);
 }
 
+/**
+ * Enabled delivery channels from LENDLOOP_NOTIFY_CHANNELS (e.g. "email,slack,discord").
+ * Falls back to LENDLOOP_NOTIFY_MODE (email|mock) for older configs. Default: mock.
+ */
+function enabledChannels() {
+  const known = ['email', 'slack', 'discord', 'mock'];
+  const raw = $env.LENDLOOP_NOTIFY_CHANNELS || ($env.LENDLOOP_NOTIFY_MODE === 'email' ? 'email' : 'mock');
+  const list = String(raw).split(',').map((c) => c.trim().toLowerCase()).filter((c) => known.includes(c));
+  return list.length ? [...new Set(list)] : ['mock'];
+}
+
 /** Remember a delivered request-notification eventId (7 days) so a Convex redelivery isn't sent twice. */
 function rememberDelivered(ref) {
   if (!ref || !ref.eventId) return;
