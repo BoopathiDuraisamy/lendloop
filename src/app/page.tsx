@@ -1,5 +1,4 @@
-import { Show, SignInButton } from "@clerk/nextjs";
-import Link from "next/link";
+import { HeroCta } from "@/components/HeroCta";
 import { PublicToolList } from "@/components/PublicToolList";
 
 export default function Home() {
@@ -15,18 +14,7 @@ export default function Home() {
           with requests, approvals and friendly reminders handled for you.
         </p>
         <div className="mt-6">
-          <Show when="signed-out">
-            <SignInButton mode="modal" forceRedirectUrl="/dashboard">
-              <button className="btn bg-white px-4 py-2 text-emerald-800 hover:bg-emerald-50">
-                Sign in to lend or borrow
-              </button>
-            </SignInButton>
-          </Show>
-          <Show when="signed-in">
-            <Link href="/dashboard" className="btn bg-white px-4 py-2 text-emerald-800 hover:bg-emerald-50">
-              Go to your dashboard →
-            </Link>
-          </Show>
+          <HeroCta />
         </div>
       </section>
 
