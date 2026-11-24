@@ -1,12 +1,13 @@
 "use client";
 
 import { api } from "@convex/_generated/api";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useSessionQuery } from "@/components/DashboardSession";
 import { ActionButton, LoanCard } from "@/components/LoanCard";
 import { EmptyState, PageTitle } from "@/components/ui";
 
 export default function IncomingPage() {
-  const loans = useQuery(api.loans.incoming);
+  const loans = useSessionQuery(api.loans.incoming);
   const decide = useMutation(api.loans.decide);
   const markReturned = useMutation(api.loans.markReturned);
 

@@ -4,7 +4,8 @@ import { api } from "@convex/_generated/api";
 import type { Id } from "@convex/_generated/dataModel";
 import type { Category } from "@convex/lib/validators";
 import type { FunctionReturnType } from "convex/server";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useSessionQuery } from "@/components/DashboardSession";
 import Link from "next/link";
 import { useState } from "react";
 import { AvailabilityBadge, EmptyState, ErrorText, PageTitle, TrustedBadge } from "@/components/ui";
@@ -20,7 +21,7 @@ import {
 
 export default function BrowsePage() {
   const [category, setCategory] = useState<Category | undefined>(undefined);
-  const tools = useQuery(api.tools.list, { category });
+  const tools = useSessionQuery(api.tools.list, { category });
 
   return (
     <div>

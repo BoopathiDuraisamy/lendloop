@@ -3,7 +3,8 @@
 import { api } from "@convex/_generated/api";
 import type { Category, Condition } from "@convex/lib/validators";
 import type { FunctionReturnType } from "convex/server";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useSessionQuery } from "@/components/DashboardSession";
 import { useState } from "react";
 import { AvailabilityBadge, EmptyState, ErrorText, PageTitle } from "@/components/ui";
 import {
@@ -20,7 +21,7 @@ type FormValues = { name: string; category: Category; condition: Condition; desc
 const EMPTY: FormValues = { name: "", category: "power_tools", condition: "good", description: "" };
 
 export default function ListingsPage() {
-  const listings = useQuery(api.tools.myListings);
+  const listings = useSessionQuery(api.tools.myListings);
   const create = useMutation(api.tools.create);
   const [adding, setAdding] = useState(false);
 

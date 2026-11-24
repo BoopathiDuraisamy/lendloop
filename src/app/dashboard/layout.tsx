@@ -1,10 +1,10 @@
 "use client";
 
 import { api } from "@convex/_generated/api";
-import { Authenticated, AuthLoading, Unauthenticated, useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
+import { DashboardSession, useSessionQuery, useSessionStatus } from "@/components/DashboardSession";
 import { TrustedBadge } from "@/components/ui";
 
 const NAV = [
@@ -14,46 +14,40 @@ const NAV = [
   { href: "/dashboard/incoming", label: "Incoming requests" },
 ];
 
+/**
+ * Always renders `children`, even before auth resolves, so every dashboard page
+ * is part of the prerendered tree (instant navigation + Next.js validation).
+ * Pages wait for the session via `useSessionQuery`; access is enforced in Convex.
+ */
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   return (
-    <>
-      <AuthLoading>
-        <p className="text-sm text-stone-500">Loading…</p>
-      </AuthLoading>
-      <Unauthenticated>
-        <div className="card text-sm">
-          Your session couldn&apos;t be verified by the backend. Check that the Clerk ↔ Convex integration is
-          configured (see README), then refresh.
-        </div>
-      </Unauthenticated>
-      <Authenticated>
-        <EnsureUser>
-          <DashboardNav />
-          {children}
-        </EnsureUser>
-      </Authenticated>
-    </>
+    <DashboardSession>
+      <DashboardNav />
+      <SessionNotice />
+      {children}
+    </DashboardSession>
   );
 }
 
-/** Upserts the Convex user row from the verified Clerk identity before rendering. */
-function EnsureUser({ children }: { children: ReactNode }) {
-  const store = useMutation(api.users.store);
-  const me = useQuery(api.users.me);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    store().catch(() => setError("Couldn't set up your account. Please refresh."));
-  }, [store]);
-
-  if (error) return <div className="card text-sm text-red-700">{error}</div>;
-  if (!me) return <p className="text-sm text-stone-500">Setting up your account…</p>;
-  return <>{children}</>;
+function SessionNotice() {
+  const status = useSessionStatus();
+  if (status === "unauthenticated") {
+    return (
+      <div className="card mb-4 text-sm">
+        Your session couldn&apos;t be verified by the backend. Check that the Clerk ↔ Convex integration is
+        configured (see README), then refresh.
+      </div>
+    );
+  }
+  if (status === "error") {
+    return <div className="card mb-4 text-sm text-red-700">Couldn&apos;t set up your account. Please refresh.</div>;
+  }
+  return null;
 }
 
 function DashboardNav() {
   const pathname = usePathname();
-  const me = useQuery(api.users.me);
+  const me = useSessionQuery(api.users.me);
   const items = me?.role === "admin" ? [...NAV, { href: "/dashboard/admin", label: "Admin" }] : NAV;
 
   return (

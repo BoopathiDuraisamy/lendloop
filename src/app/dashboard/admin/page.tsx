@@ -2,7 +2,8 @@
 
 import { api } from "@convex/_generated/api";
 import type { LoanStatus } from "@convex/lib/validators";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useSessionQuery } from "@/components/DashboardSession";
 import { useState } from "react";
 import { ActionButton, LoanCard } from "@/components/LoanCard";
 import { EmptyState, PageTitle } from "@/components/ui";
@@ -13,7 +14,7 @@ import { CATEGORY_LABELS, STATUS_LABELS, timeAgo } from "@/lib/format";
  * `requireAdmin` in each Convex function: non-admins get FORBIDDEN here.
  */
 export default function AdminPage() {
-  const me = useQuery(api.users.me);
+  const me = useSessionQuery(api.users.me);
   if (me === undefined) return <p className="text-sm text-stone-500">Loading…</p>;
   if (me?.role !== "admin") return <EmptyState>Admins only.</EmptyState>;
 
@@ -29,7 +30,7 @@ export default function AdminPage() {
 }
 
 function AutomationFailures() {
-  const failures = useQuery(api.automation.recentFailures);
+  const failures = useSessionQuery(api.automation.recentFailures);
   return (
     <section>
       <h2 className="mb-3 font-semibold">Automation failures</h2>
@@ -53,7 +54,7 @@ function AutomationFailures() {
 }
 
 function Listings() {
-  const tools = useQuery(api.tools.list, {});
+  const tools = useSessionQuery(api.tools.list, {});
   const remove = useMutation(api.tools.remove);
   return (
     <section>
@@ -82,7 +83,7 @@ function Listings() {
 }
 
 function Members() {
-  const users = useQuery(api.users.listForAdmin);
+  const users = useSessionQuery(api.users.listForAdmin);
   const setTrusted = useMutation(api.users.setTrustedLender);
   return (
     <section>
@@ -116,7 +117,7 @@ const STATUSES: LoanStatus[] = ["pending", "approved", "declined", "cancelled", 
 
 function AllLoans() {
   const [status, setStatus] = useState<LoanStatus | undefined>(undefined);
-  const loans = useQuery(api.loans.listAll, { status });
+  const loans = useSessionQuery(api.loans.listAll, { status });
   return (
     <section>
       <div className="mb-3 flex items-center justify-between">
