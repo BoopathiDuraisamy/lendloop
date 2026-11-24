@@ -39,7 +39,7 @@
         300
       ],
       "parameters": {
-        "jsCode": "// ---- shared helpers (inlined into each Code node by scripts/build-workflows.mjs) ----\n// Secrets come from the n8n container environment, never from workflow JSON.\nconst crypto = require('crypto');\n\nfunction lendloopSecret() {\n  const secret = $env.LENDLOOP_HMAC_SECRET;\n  if (!secret) throw new Error('LENDLOOP_HMAC_SECRET is not set in the n8n environment');\n  return secret;\n}\n\n/** Wrap an object in the signed envelope Convex expects. */\nfunction signForLendLoop(obj) {\n  const payload = JSON.stringify(obj);\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const signature =\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex');\n  return { payload, timestamp, signature };\n}\n\n/** Verify a signed envelope from Convex. Returns parsed data or throws. */\nfunction verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300) {\n  if (typeof payload !== 'string' || !timestamp || !signature) throw new Error('missing payload or signature headers');\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > maxSkewSeconds) throw new Error('stale timestamp');\n  const expected = Buffer.from(\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex'),\n  );\n  const given = Buffer.from(String(signature));\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    throw new Error('signature mismatch');\n  }\n  return JSON.parse(payload);\n}\n\n/** Mask an email for logs: jane.doe@example.com -> j***@example.com */\nfunction maskEmail(email) {\n  if (!email) return null;\n  const [user, domain] = String(email).split('@');\n  return `${user.slice(0, 1)}***@${domain}`;\n}\n// ---- end shared helpers ----\n\n// Verify the HMAC signature on the incoming Convex webhook and de-duplicate by eventId.\nconst item = $input.first().json;\nconst headers = item.headers || {};\nlet data;\ntry {\n  data = verifyFromLendLoop(\n    item.body && item.body.payload,\n    headers['x-lendloop-timestamp'],\n    headers['x-lendloop-signature'],\n  );\n} catch (err) {\n  // Do not echo the payload: it may be forged and contains personal data.\n  return [{ json: { valid: false, reason: err.message } }];\n}\n\n// Convex may retry after a timeout even though we received it. Remember\n// delivered eventIds (production executions persist workflow static data).\nconst store = $getWorkflowStaticData('global');\nstore.delivered = store.delivered || {};\nconst duplicate = Boolean(store.delivered[data.eventId]);\n\nreturn [{ json: { valid: true, duplicate, event: data } }];\n"
+        "jsCode": "// ---- shared helpers (inlined into each Code node by scripts/build-workflows.mjs) ----\n// Secrets come from the n8n container environment, never from workflow JSON.\nconst crypto = require('crypto');\n\nfunction lendloopSecret() {\n  const secret = $env.LENDLOOP_HMAC_SECRET;\n  if (!secret) throw new Error('LENDLOOP_HMAC_SECRET is not set in the n8n environment');\n  return secret;\n}\n\n/** Wrap an object in the signed envelope Convex expects. */\nfunction signForLendLoop(obj) {\n  const payload = JSON.stringify(obj);\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const signature =\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex');\n  return { payload, timestamp, signature };\n}\n\n/** Verify a signed envelope from Convex. Returns parsed data or throws. */\nfunction verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300) {\n  if (typeof payload !== 'string' || !timestamp || !signature) throw new Error('missing payload or signature headers');\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > maxSkewSeconds) throw new Error('stale timestamp');\n  const expected = Buffer.from(\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex'),\n  );\n  const given = Buffer.from(String(signature));\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    throw new Error('signature mismatch');\n  }\n  return JSON.parse(payload);\n}\n\n/** Remember a delivered request-notification eventId (7 days) so a Convex redelivery isn't sent twice. */\nfunction rememberDelivered(ref) {\n  if (!ref || !ref.eventId) return;\n  const store = $getWorkflowStaticData('global');\n  store.delivered = store.delivered || {};\n  const now = Date.now();\n  store.delivered[ref.eventId] = now;\n  for (const [k, t] of Object.entries(store.delivered)) if (now - t > 7 * 864e5) delete store.delivered[k];\n}\n\n/** Mask an email for logs: jane.doe@example.com -> j***@example.com */\nfunction maskEmail(email) {\n  if (!email) return '(no email on file)';\n  const [user, domain] = String(email).split('@');\n  return `${user.slice(0, 1)}***@${domain}`;\n}\n// ---- end shared helpers ----\n\n// Verify the HMAC signature on the incoming Convex webhook and de-duplicate by eventId.\nconst item = $input.first().json;\nconst headers = item.headers || {};\nlet data;\ntry {\n  data = verifyFromLendLoop(\n    item.body && item.body.payload,\n    headers['x-lendloop-timestamp'],\n    headers['x-lendloop-signature'],\n  );\n} catch (err) {\n  // Do not echo the payload: it may be forged and contains personal data.\n  return [{ json: { valid: false, reason: err.message } }];\n}\n\n// Convex may retry after a timeout even though we received it. Remember\n// delivered eventIds (production executions persist workflow static data).\nconst store = $getWorkflowStaticData('global');\nstore.delivered = store.delivered || {};\nconst duplicate = Boolean(store.delivered[data.eventId]);\n\nreturn [{ json: { valid: true, duplicate, event: data } }];\n"
       }
     },
     {
@@ -156,8 +156,8 @@
       }
     },
     {
-      "id": "584b7427-f706-4cef-aaed-46acf0759926",
-      "name": "Send notification (mock)",
+      "id": "3904fd82-3b9f-4f32-ad91-6008c0f9a2d1",
+      "name": "Compose message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -165,7 +165,145 @@
         300
       ],
       "parameters": {
-        "jsCode": "// ---- shared helpers (inlined into each Code node by scripts/build-workflows.mjs) ----\n// Secrets come from the n8n container environment, never from workflow JSON.\nconst crypto = require('crypto');\n\nfunction lendloopSecret() {\n  const secret = $env.LENDLOOP_HMAC_SECRET;\n  if (!secret) throw new Error('LENDLOOP_HMAC_SECRET is not set in the n8n environment');\n  return secret;\n}\n\n/** Wrap an object in the signed envelope Convex expects. */\nfunction signForLendLoop(obj) {\n  const payload = JSON.stringify(obj);\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const signature =\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex');\n  return { payload, timestamp, signature };\n}\n\n/** Verify a signed envelope from Convex. Returns parsed data or throws. */\nfunction verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300) {\n  if (typeof payload !== 'string' || !timestamp || !signature) throw new Error('missing payload or signature headers');\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > maxSkewSeconds) throw new Error('stale timestamp');\n  const expected = Buffer.from(\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex'),\n  );\n  const given = Buffer.from(String(signature));\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    throw new Error('signature mismatch');\n  }\n  return JSON.parse(payload);\n}\n\n/** Mask an email for logs: jane.doe@example.com -> j***@example.com */\nfunction maskEmail(email) {\n  if (!email) return null;\n  const [user, domain] = String(email).split('@');\n  return `${user.slice(0, 1)}***@${domain}`;\n}\n// ---- end shared helpers ----\n\n// MOCK notification channel. Swap the send() body for a real channel (Send Email /\n// Slack / Discord node with n8n credentials) in production. Uses only the fields it needs.\nconst e = $json.event;\nconst r = e.recipient;\n\nfunction send(to, text) {\n  console.log(`[mock-email] to=${maskEmail(to) ?? '(no email on file)'} :: ${text}`);\n}\n\nconst dates = `${e.loan.startDate} → ${e.loan.endDate}`;\nconst lines = {\n  requested: `${r.name}, a neighbor asked to borrow your \"${e.loan.toolName}\" (${dates}). Review it: ${e.link}`,\n  cancelled: `${r.name}, a request for your \"${e.loan.toolName}\" (${dates}) was cancelled.`,\n  approved: `${r.name}, good news! Your request for \"${e.loan.toolName}\" (${dates}) was approved.`,\n  declined: `${r.name}, your request for \"${e.loan.toolName}\" (${dates}) was declined.`,\n  returned: `${r.name}, thanks for returning \"${e.loan.toolName}\"!`,\n};\n\ntry {\n  const text = lines[e.event];\n  if (!text) throw new Error(`unknown event type: ${e.event}`);\n  if (!r.email) throw new Error('recipient has no email on file');\n  send(r.email, text);\n} catch (err) {\n  return [{ json: { eventId: e.eventId, status: 'failed', channel: 'mock-email', detail: String(err.message).slice(0, 250) } }];\n}\n\n// Remember this eventId so a redelivery from Convex is not sent twice (7-day window).\nconst store = $getWorkflowStaticData('global');\nstore.delivered = store.delivered || {};\nconst now = Date.now();\nstore.delivered[e.eventId] = now;\nfor (const [k, t] of Object.entries(store.delivered)) if (now - t > 7 * 864e5) delete store.delivered[k];\n\nreturn [{ json: { eventId: e.eventId, status: 'sent', channel: 'mock-email' } }];\n"
+        "jsCode": "// ---- shared helpers (inlined into each Code node by scripts/build-workflows.mjs) ----\n// Secrets come from the n8n container environment, never from workflow JSON.\nconst crypto = require('crypto');\n\nfunction lendloopSecret() {\n  const secret = $env.LENDLOOP_HMAC_SECRET;\n  if (!secret) throw new Error('LENDLOOP_HMAC_SECRET is not set in the n8n environment');\n  return secret;\n}\n\n/** Wrap an object in the signed envelope Convex expects. */\nfunction signForLendLoop(obj) {\n  const payload = JSON.stringify(obj);\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const signature =\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex');\n  return { payload, timestamp, signature };\n}\n\n/** Verify a signed envelope from Convex. Returns parsed data or throws. */\nfunction verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300) {\n  if (typeof payload !== 'string' || !timestamp || !signature) throw new Error('missing payload or signature headers');\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > maxSkewSeconds) throw new Error('stale timestamp');\n  const expected = Buffer.from(\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex'),\n  );\n  const given = Buffer.from(String(signature));\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    throw new Error('signature mismatch');\n  }\n  return JSON.parse(payload);\n}\n\n/** Remember a delivered request-notification eventId (7 days) so a Convex redelivery isn't sent twice. */\nfunction rememberDelivered(ref) {\n  if (!ref || !ref.eventId) return;\n  const store = $getWorkflowStaticData('global');\n  store.delivered = store.delivered || {};\n  const now = Date.now();\n  store.delivered[ref.eventId] = now;\n  for (const [k, t] of Object.entries(store.delivered)) if (now - t > 7 * 864e5) delete store.delivered[k];\n}\n\n/** Mask an email for logs: jane.doe@example.com -> j***@example.com */\nfunction maskEmail(email) {\n  if (!email) return '(no email on file)';\n  const [user, domain] = String(email).split('@');\n  return `${user.slice(0, 1)}***@${domain}`;\n}\n// ---- end shared helpers ----\n\n// Build the notification (recipient, subject, text) from the minimal payload.\n// `ref` is what the write-back needs; `problem` marks it undeliverable.\nconst e = $json.event;\nconst r = e.recipient;\nconst tool = e.loan.toolName;\nconst dates = `${e.loan.startDate} → ${e.loan.endDate}`;\n\nconst templates = {\n  requested: [`New request for your ${tool}`, `Hi ${r.name},\\n\\nA neighbor asked to borrow your \"${tool}\" for ${dates}.\\n\\nApprove or decline it here: ${e.link}`],\n  cancelled: [`Request for your ${tool} was cancelled`, `Hi ${r.name},\\n\\nA request to borrow your \"${tool}\" (${dates}) was cancelled. No action needed.`],\n  approved: [`Approved: ${tool}`, `Hi ${r.name},\\n\\nGood news! Your request to borrow \"${tool}\" for ${dates} was approved.\\n\\nDetails: ${e.link}`],\n  declined: [`Request declined: ${tool}`, `Hi ${r.name},\\n\\nYour request to borrow \"${tool}\" for ${dates} was declined. Other neighbors may have something similar: ${e.link}`],\n  returned: [`Thanks for returning the ${tool}`, `Hi ${r.name},\\n\\nThe lender confirmed \"${tool}\" is back. Thanks for being a great neighbor!`],\n};\n\nconst t = templates[e.event];\nconst problem = !t ? `unknown event type: ${e.event}` : !r.email ? 'recipient has no email on file' : null;\nreturn [{\n  json: {\n    ref: { eventId: e.eventId },\n    to: r.email,\n    subject: t ? `LendLoop · ${t[0]}` : '',\n    text: t ? `${t[1]}\\n\\n— LendLoop\\nYou're receiving this because you use LendLoop.` : '',\n    problem,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "46d44ef1-9483-4203-a9d8-7f42fe496e2a",
+      "name": "Can send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "68c543df-9705-4f9b-a75e-a8c3ad5ec661",
+              "leftValue": "={{ !$json.problem }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "51a6a9e9-b66a-43f1-a8ac-39036b9904cf",
+      "name": "Email mode?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c8810c7f-6c0c-413f-af9c-0cc3854f07af",
+              "leftValue": "={{ $env.LENDLOOP_NOTIFY_MODE === 'email' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "12c9d3c0-2f14-4b62-acd3-1db7476f0aa7",
+      "name": "Send email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1760,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "fromEmail": "={{ $env.LENDLOOP_MAIL_FROM }}",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.text }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "smtp": {
+          "id": "lendloopSmtp0001",
+          "name": "LendLoop SMTP"
+        }
+      }
+    },
+    {
+      "id": "1ebd4a76-ad91-4708-a6f9-fa06e4362f68",
+      "name": "Send (mock)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// ---- shared helpers (inlined into each Code node by scripts/build-workflows.mjs) ----\n// Secrets come from the n8n container environment, never from workflow JSON.\nconst crypto = require('crypto');\n\nfunction lendloopSecret() {\n  const secret = $env.LENDLOOP_HMAC_SECRET;\n  if (!secret) throw new Error('LENDLOOP_HMAC_SECRET is not set in the n8n environment');\n  return secret;\n}\n\n/** Wrap an object in the signed envelope Convex expects. */\nfunction signForLendLoop(obj) {\n  const payload = JSON.stringify(obj);\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const signature =\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex');\n  return { payload, timestamp, signature };\n}\n\n/** Verify a signed envelope from Convex. Returns parsed data or throws. */\nfunction verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300) {\n  if (typeof payload !== 'string' || !timestamp || !signature) throw new Error('missing payload or signature headers');\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > maxSkewSeconds) throw new Error('stale timestamp');\n  const expected = Buffer.from(\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex'),\n  );\n  const given = Buffer.from(String(signature));\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    throw new Error('signature mismatch');\n  }\n  return JSON.parse(payload);\n}\n\n/** Remember a delivered request-notification eventId (7 days) so a Convex redelivery isn't sent twice. */\nfunction rememberDelivered(ref) {\n  if (!ref || !ref.eventId) return;\n  const store = $getWorkflowStaticData('global');\n  store.delivered = store.delivered || {};\n  const now = Date.now();\n  store.delivered[ref.eventId] = now;\n  for (const [k, t] of Object.entries(store.delivered)) if (now - t > 7 * 864e5) delete store.delivered[k];\n}\n\n/** Mask an email for logs: jane.doe@example.com -> j***@example.com */\nfunction maskEmail(email) {\n  if (!email) return '(no email on file)';\n  const [user, domain] = String(email).split('@');\n  return `${user.slice(0, 1)}***@${domain}`;\n}\n// ---- end shared helpers ----\n\n// MOCK channel (LENDLOOP_NOTIFY_MODE=mock): log instead of sending. Runs once per item.\nconst m = $json;\nconsole.log(`[mock-email] to=${maskEmail(m.to)} subject=\"${m.subject}\"`);\nrememberDelivered(m.ref);\nreturn { json: { ...m.ref, status: 'sent', channel: 'mock-email' } };\n",
+        "mode": "runOnceForEachItem"
+      }
+    },
+    {
+      "id": "16b52075-c2c4-4529-ae4f-f43ce986c2ac",
+      "name": "Mark sent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        40
+      ],
+      "parameters": {
+        "jsCode": "// ---- shared helpers (inlined into each Code node by scripts/build-workflows.mjs) ----\n// Secrets come from the n8n container environment, never from workflow JSON.\nconst crypto = require('crypto');\n\nfunction lendloopSecret() {\n  const secret = $env.LENDLOOP_HMAC_SECRET;\n  if (!secret) throw new Error('LENDLOOP_HMAC_SECRET is not set in the n8n environment');\n  return secret;\n}\n\n/** Wrap an object in the signed envelope Convex expects. */\nfunction signForLendLoop(obj) {\n  const payload = JSON.stringify(obj);\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const signature =\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex');\n  return { payload, timestamp, signature };\n}\n\n/** Verify a signed envelope from Convex. Returns parsed data or throws. */\nfunction verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300) {\n  if (typeof payload !== 'string' || !timestamp || !signature) throw new Error('missing payload or signature headers');\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > maxSkewSeconds) throw new Error('stale timestamp');\n  const expected = Buffer.from(\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex'),\n  );\n  const given = Buffer.from(String(signature));\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    throw new Error('signature mismatch');\n  }\n  return JSON.parse(payload);\n}\n\n/** Remember a delivered request-notification eventId (7 days) so a Convex redelivery isn't sent twice. */\nfunction rememberDelivered(ref) {\n  if (!ref || !ref.eventId) return;\n  const store = $getWorkflowStaticData('global');\n  store.delivered = store.delivered || {};\n  const now = Date.now();\n  store.delivered[ref.eventId] = now;\n  for (const [k, t] of Object.entries(store.delivered)) if (now - t > 7 * 864e5) delete store.delivered[k];\n}\n\n/** Mask an email for logs: jane.doe@example.com -> j***@example.com */\nfunction maskEmail(email) {\n  if (!email) return '(no email on file)';\n  const [user, domain] = String(email).split('@');\n  return `${user.slice(0, 1)}***@${domain}`;\n}\n// ---- end shared helpers ----\n\n// Send Email succeeded for this item. Runs once per item.\nconst m = $('Compose message').item.json;\nrememberDelivered(m.ref);\nreturn { json: { ...m.ref, status: 'sent', channel: 'email' } };\n",
+        "mode": "runOnceForEachItem"
+      }
+    },
+    {
+      "id": "b51f9e7e-08e5-4faa-a03f-896bda50af43",
+      "name": "Mark failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        420
+      ],
+      "parameters": {
+        "jsCode": "// ---- shared helpers (inlined into each Code node by scripts/build-workflows.mjs) ----\n// Secrets come from the n8n container environment, never from workflow JSON.\nconst crypto = require('crypto');\n\nfunction lendloopSecret() {\n  const secret = $env.LENDLOOP_HMAC_SECRET;\n  if (!secret) throw new Error('LENDLOOP_HMAC_SECRET is not set in the n8n environment');\n  return secret;\n}\n\n/** Wrap an object in the signed envelope Convex expects. */\nfunction signForLendLoop(obj) {\n  const payload = JSON.stringify(obj);\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const signature =\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex');\n  return { payload, timestamp, signature };\n}\n\n/** Verify a signed envelope from Convex. Returns parsed data or throws. */\nfunction verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300) {\n  if (typeof payload !== 'string' || !timestamp || !signature) throw new Error('missing payload or signature headers');\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > maxSkewSeconds) throw new Error('stale timestamp');\n  const expected = Buffer.from(\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex'),\n  );\n  const given = Buffer.from(String(signature));\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    throw new Error('signature mismatch');\n  }\n  return JSON.parse(payload);\n}\n\n/** Remember a delivered request-notification eventId (7 days) so a Convex redelivery isn't sent twice. */\nfunction rememberDelivered(ref) {\n  if (!ref || !ref.eventId) return;\n  const store = $getWorkflowStaticData('global');\n  store.delivered = store.delivered || {};\n  const now = Date.now();\n  store.delivered[ref.eventId] = now;\n  for (const [k, t] of Object.entries(store.delivered)) if (now - t > 7 * 864e5) delete store.delivered[k];\n}\n\n/** Mask an email for logs: jane.doe@example.com -> j***@example.com */\nfunction maskEmail(email) {\n  if (!email) return '(no email on file)';\n  const [user, domain] = String(email).split('@');\n  return `${user.slice(0, 1)}***@${domain}`;\n}\n// ---- end shared helpers ----\n\n// Couldn't deliver this item (no email on file, or SMTP failed after retries).\n// Reported to LendLoop as \"failed\" so it's visible on the loan. Runs once per item.\nconst m = $('Compose message').item.json;\nconst err = $json.error;\nconst detail = m.problem || (err && (err.message || err.description)) || (typeof err === 'string' ? err : 'send failed');\nreturn { json: { ...m.ref, status: 'failed', channel: m.problem ? 'none' : 'email', detail: String(detail).slice(0, 250) } };\n",
+        "mode": "runOnceForEachItem"
       }
     },
     {
@@ -174,11 +312,11 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1320,
+        2200,
         300
       ],
       "parameters": {
-        "jsCode": "// ---- shared helpers (inlined into each Code node by scripts/build-workflows.mjs) ----\n// Secrets come from the n8n container environment, never from workflow JSON.\nconst crypto = require('crypto');\n\nfunction lendloopSecret() {\n  const secret = $env.LENDLOOP_HMAC_SECRET;\n  if (!secret) throw new Error('LENDLOOP_HMAC_SECRET is not set in the n8n environment');\n  return secret;\n}\n\n/** Wrap an object in the signed envelope Convex expects. */\nfunction signForLendLoop(obj) {\n  const payload = JSON.stringify(obj);\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const signature =\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex');\n  return { payload, timestamp, signature };\n}\n\n/** Verify a signed envelope from Convex. Returns parsed data or throws. */\nfunction verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300) {\n  if (typeof payload !== 'string' || !timestamp || !signature) throw new Error('missing payload or signature headers');\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > maxSkewSeconds) throw new Error('stale timestamp');\n  const expected = Buffer.from(\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex'),\n  );\n  const given = Buffer.from(String(signature));\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    throw new Error('signature mismatch');\n  }\n  return JSON.parse(payload);\n}\n\n/** Mask an email for logs: jane.doe@example.com -> j***@example.com */\nfunction maskEmail(email) {\n  if (!email) return null;\n  const [user, domain] = String(email).split('@');\n  return `${user.slice(0, 1)}***@${domain}`;\n}\n// ---- end shared helpers ----\n\n// Sign each write-back body for Convex. Idempotency key (eventId/reminderKey)\n// travels inside the payload, so HTTP retries are safe.\nreturn $input.all().map((item) => ({ json: signForLendLoop(item.json) }));\n"
+        "jsCode": "// ---- shared helpers (inlined into each Code node by scripts/build-workflows.mjs) ----\n// Secrets come from the n8n container environment, never from workflow JSON.\nconst crypto = require('crypto');\n\nfunction lendloopSecret() {\n  const secret = $env.LENDLOOP_HMAC_SECRET;\n  if (!secret) throw new Error('LENDLOOP_HMAC_SECRET is not set in the n8n environment');\n  return secret;\n}\n\n/** Wrap an object in the signed envelope Convex expects. */\nfunction signForLendLoop(obj) {\n  const payload = JSON.stringify(obj);\n  const timestamp = String(Math.floor(Date.now() / 1000));\n  const signature =\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex');\n  return { payload, timestamp, signature };\n}\n\n/** Verify a signed envelope from Convex. Returns parsed data or throws. */\nfunction verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300) {\n  if (typeof payload !== 'string' || !timestamp || !signature) throw new Error('missing payload or signature headers');\n  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > maxSkewSeconds) throw new Error('stale timestamp');\n  const expected = Buffer.from(\n    'sha256=' + crypto.createHmac('sha256', lendloopSecret()).update(`${timestamp}.${payload}`).digest('hex'),\n  );\n  const given = Buffer.from(String(signature));\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    throw new Error('signature mismatch');\n  }\n  return JSON.parse(payload);\n}\n\n/** Remember a delivered request-notification eventId (7 days) so a Convex redelivery isn't sent twice. */\nfunction rememberDelivered(ref) {\n  if (!ref || !ref.eventId) return;\n  const store = $getWorkflowStaticData('global');\n  store.delivered = store.delivered || {};\n  const now = Date.now();\n  store.delivered[ref.eventId] = now;\n  for (const [k, t] of Object.entries(store.delivered)) if (now - t > 7 * 864e5) delete store.delivered[k];\n}\n\n/** Mask an email for logs: jane.doe@example.com -> j***@example.com */\nfunction maskEmail(email) {\n  if (!email) return '(no email on file)';\n  const [user, domain] = String(email).split('@');\n  return `${user.slice(0, 1)}***@${domain}`;\n}\n// ---- end shared helpers ----\n\n// Sign each write-back body for Convex. Idempotency key (eventId/reminderKey)\n// travels inside the payload, so HTTP retries are safe.\nreturn $input.all().map((item) => ({ json: signForLendLoop(item.json) }));\n"
       }
     },
     {
@@ -187,7 +325,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1540,
+        2420,
         300
       ],
       "retryOnFail": true,
@@ -286,14 +424,101 @@
         [],
         [
           {
-            "node": "Send notification (mock)",
+            "node": "Compose message",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Send notification (mock)": {
+    "Compose message": {
+      "main": [
+        [
+          {
+            "node": "Can send?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Can send?": {
+      "main": [
+        [
+          {
+            "node": "Email mode?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email mode?": {
+      "main": [
+        [
+          {
+            "node": "Send email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send (mock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send email": {
+      "main": [
+        [
+          {
+            "node": "Mark sent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send (mock)": {
+      "main": [
+        [
+          {
+            "node": "Sign write-back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark sent": {
+      "main": [
+        [
+          {
+            "node": "Sign write-back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark failed": {
       "main": [
         [
           {

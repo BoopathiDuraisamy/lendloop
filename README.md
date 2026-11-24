@@ -113,12 +113,12 @@ The signature covers the exact payload **string**, so neither side has to re-ser
 
 1. A Convex mutation (request / approve / decline / cancel / return) writes an `automationEvents` row (key `notify:<loanId>:<event>`) **in the same transaction** and schedules `n8n.deliverRequestEvent`. This is a transactional outbox: no status change without its notification, and no notification for a rolled-back change.
 2. The action builds a **minimal payload**: recipient name and email, tool name, dates, status, a link. Other users' ids, notes and descriptions are left out. It signs and POSTs to the n8n webhook, retrying with exponential backoff (5s → 40s, 5 attempts) on network errors, 5xx and 429. A permanent failure is recorded as `failed`, shown on the loan, and listed in Admin.
-3. In n8n: **Webhook → Verify signature** (HMAC, timestamp; de-dupes by `eventId` using workflow static data) **→ 202 response → Send (mock) → Sign → POST `/n8n/notification-status`** (retries 4×).
+3. In n8n: **Webhook → Verify signature** (HMAC, timestamp; de-dupes by `eventId` using workflow static data) **→ 202 response → Compose → Send (email or mock) → Sign → POST `/n8n/notification-status`** (retries 4×).
    Invalid signatures get a 401 and the run is marked failed (*Stop and Error*), so the error workflow reports it.
 
 ### Workflow 2 – Daily overdue reminders (`n8n/workflows/overdue-reminders.json`)
 
-**Schedule (09:00) → Sign → POST `/n8n/overdue-loans` → split → Send reminder (mock), once per loan → Sign → POST `/n8n/reminder-status`**
+**Schedule (09:00) → Sign → POST `/n8n/overdue-loans` → split → Compose → Send (email or mock), once per loan → Sign → POST `/n8n/reminder-status`**
 
 - Convex returns only approved loans past `endDate` that have **not already been reminded today**, each with a `reminderKey = overdue:<loanId>:<YYYY-MM-DD>`.
 - The write-back is **idempotent on `reminderKey`**. A retried or re-run write-back returns `{duplicate: true}` and does not create a second row or increment `reminderCount`. A `failed` reminder can later be upgraded to `sent`.
@@ -196,6 +196,7 @@ docker compose exec n8n n8n publish:workflow --id=lendloopNotify01
 docker compose exec n8n n8n publish:workflow --id=lendloopRemind01
 docker compose exec n8n n8n publish:workflow --id=lendloopErrors01
 docker compose restart n8n
+# Note: re-running n8n-import unpublishes workflows, so publish them again afterwards.
 ```
 
 **Let Convex cloud reach the webhook.** `docker compose --profile tunnel up -d` starts a Cloudflare quick
@@ -206,8 +207,24 @@ docker compose --profile tunnel up -d
 docker compose logs tunnel | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com'
 npx convex env set N8N_REQUEST_WEBHOOK_URL https://<that-host>/webhook/lendloop-request-events
 ```
-A quick-tunnel URL changes whenever the `tunnel` container restarts. Re-run the last two commands when it does,
-or use a named Cloudflare tunnel or n8n Cloud for a stable URL.
+A quick-tunnel URL changes whenever the `tunnel` container restarts, and Cloudflare may expire it. Run
+`npm run tunnel:refresh` to get a new one and update Convex, or use a named Cloudflare tunnel or n8n Cloud for a stable URL.
+
+**Real email (optional).** Notifications are mock-logged by default. To send real email:
+1. `cp n8n/smtp.env.example n8n/smtp.env` and fill in your SMTP login. For Gmail, create an
+   [App Password](https://myaccount.google.com/apppasswords) (requires 2-Step Verification).
+2. `docker compose run --rm n8n-smtp` stores it as the encrypted n8n credential **LendLoop SMTP**.
+   `smtp.env` is git-ignored and only given to this one-shot container. The running n8n never has the
+   password in its environment, so workflow code can't read it.
+3. In `n8n/.env` set `LENDLOOP_NOTIFY_MODE=email` and `LENDLOOP_MAIL_FROM=LendLoop <you@gmail.com>`,
+   then `docker compose up -d n8n`.
+
+Send failures are retried 3× and then written back as `failed`, so the loan shows e.g.
+"Notification failed: Invalid login". `n8n-import` creates a placeholder credential so workflows can be
+published in mock mode, because n8n won't publish a workflow whose credential is missing.
+
+**Tunnel URL changed / notifications failing with network errors?** Free quick tunnels can expire.
+`npm run tunnel:refresh` (Node 22+) restarts the tunnel and updates Convex automatically.
 
 **Run the overdue reminders now** (instead of waiting for 09:00): open the workflow in the editor and click
 *Execute workflow* (it has a "Run now" manual trigger), or from the CLI:
@@ -228,6 +245,7 @@ Sign in with the email from `ADMIN_EMAILS` to see the Admin tab. Use a second ac
 | `npm run dev` | Next.js dev server |
 | `npm run dev:convex` | Convex dev (codegen + push on save) |
 | `npm run typecheck` / `npm run lint` | checks |
+| `npm run tunnel:refresh` | new Cloudflare quick tunnel + update Convex webhook URL |
 | `npm run n8n:build` | regenerate `n8n/workflows/*.json` from `n8n/code/*.js` |
 
 ---
@@ -247,6 +265,9 @@ Sign in with the email from `ADMIN_EMAILS` to see the Admin tab. Use a second ac
 | `n8n/.env` | `LENDLOOP_HMAC_SECRET` | same value as `N8N_WEBHOOK_SECRET` |
 | `n8n/.env` | `LENDLOOP_CONVEX_SITE_URL` | Convex HTTP actions base URL (`…convex.site` or `:3211` locally) |
 | `n8n/.env` | `N8N_ENCRYPTION_KEY` | encrypts n8n credentials at rest |
+| `n8n/.env` | `LENDLOOP_NOTIFY_MODE` | `mock` (default) or `email` |
+| `n8n/.env` | `LENDLOOP_MAIL_FROM` | sender, e.g. `LendLoop <you@gmail.com>` |
+| `n8n/smtp.env` | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` | read only by `n8n-smtp` to create the encrypted credential |
 
 ---
 
@@ -255,7 +276,7 @@ Sign in with the email from `ADMIN_EMAILS` to see the Admin tab. Use a second ac
 - **Public page shows name + category only.** `tools.listPublic` returns nothing else: no owner, description or availability.
 - **Signed-in views show display names, never contact details.** Emails are visible only to admins and to the n8n notification payload for the single recipient.
 - **n8n gets the minimum.** One recipient's name and email, the tool name, the dates and the status. No other user ids, notes or descriptions. The overdue feed is the same: borrower name and email, tool, due date.
-- **Mock channel masks emails in logs** (`j***@example.com`).
+- **Mock channel masks emails in logs** (`j***@example.com`). Real email uses an n8n SMTP credential (encrypted at rest). The SMTP password is never in workflow JSON or the n8n container's environment.
 - **Identity comes from the verified JWT**, and the user row is keyed by `tokenIdentifier`. Name and email are fetched server-to-server from Clerk's Backend API (or taken from token claims if configured), never from client arguments. Admin requires an email in `ADMIN_EMAILS` that Clerk reports as **verified**.
 - **HMAC both ways**, with timestamped replay protection, constant-time comparison, a generic 401, a 16 KB body cap and per-field validation on every inbound payload.
 - **Idempotency everywhere it matters.** Outbound events are keyed `notify:<loan>:<event>`, and n8n also de-dupes by `eventId`. Reminders are keyed `overdue:<loan>:<date>` and errors `n8n-error:<executionId>`.
@@ -266,7 +287,7 @@ Sign in with the email from `ADMIN_EMAILS` to see the Admin tab. Use a second ac
 
 ## What I'd change for production
 
-- **Real channels**: replace the mock Code nodes with Send Email (SMTP or Resend) or Slack nodes using **n8n credentials**, and add per-user notification preferences and unsubscribe.
+- **Email at scale**: switch SMTP from Gmail to a transactional provider (Resend, SES, Postmark) with SPF/DKIM on your domain, and add per-user notification preferences and unsubscribe links.
 - **Secrets**: use a secrets manager (Doppler, AWS SM or 1Password) for n8n env and Convex env, rotate the HMAC secret with a dual-key verification window, and use separate secrets per direction and per environment.
 - **n8n hardening**: pin the image version, use Postgres instead of SQLite, run queue mode with workers, serve over HTTPS behind a reverse proxy, put SSO on the editor, and keep the webhook path unguessable and IP-allowlisted where possible.
 - **Replay protection**: store seen nonces or eventIds server-side (not just a timestamp window), and sign responses too.

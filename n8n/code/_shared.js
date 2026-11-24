@@ -31,9 +31,19 @@ function verifyFromLendLoop(payload, timestamp, signature, maxSkewSeconds = 300)
   return JSON.parse(payload);
 }
 
+/** Remember a delivered request-notification eventId (7 days) so a Convex redelivery isn't sent twice. */
+function rememberDelivered(ref) {
+  if (!ref || !ref.eventId) return;
+  const store = $getWorkflowStaticData('global');
+  store.delivered = store.delivered || {};
+  const now = Date.now();
+  store.delivered[ref.eventId] = now;
+  for (const [k, t] of Object.entries(store.delivered)) if (now - t > 7 * 864e5) delete store.delivered[k];
+}
+
 /** Mask an email for logs: jane.doe@example.com -> j***@example.com */
 function maskEmail(email) {
-  if (!email) return null;
+  if (!email) return '(no email on file)';
   const [user, domain] = String(email).split('@');
   return `${user.slice(0, 1)}***@${domain}`;
 }

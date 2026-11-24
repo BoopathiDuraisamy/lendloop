@@ -106,8 +106,58 @@ const respond = (wf, name, code, body, position) => ({
 
 const link = (...targets) => ({ main: targets.map((t) => (t ? [t].flat().map((n) => ({ node: n, type: "main", index: 0 })) : [])) });
 
+
+const SMTP_CREDENTIAL = { id: "lendloopSmtp0001", name: "LendLoop SMTP" };
+
+/**
+ * Shared delivery stage (after a "Compose message" node that outputs
+ * {ref, to, subject, text, problem}). LENDLOOP_NOTIFY_MODE=email sends via
+ * SMTP (credential stored in n8n, referenced by id/name only); anything else
+ * logs a mock message. Every path ends in a {…ref, status} write-back item.
+ */
+function delivery(wf, x, y, next) {
+  const each = { mode: "runOnceForEachItem" };
+  const nodes = [
+    ifNode(wf, "Can send?", "={{ !$json.problem }}", [x, y]),
+    ifNode(wf, "Email mode?", "={{ $env.LENDLOOP_NOTIFY_MODE === 'email' }}", [x + 220, y - 100]),
+    {
+      id: uuid(`${wf}:Send email`),
+      name: "Send email",
+      type: "n8n-nodes-base.emailSend",
+      typeVersion: 2.1,
+      position: [x + 440, y - 200],
+      retryOnFail: true,
+      maxTries: 3,
+      waitBetweenTries: 5000,
+      onError: "continueErrorOutput",
+      parameters: {
+        fromEmail: "={{ $env.LENDLOOP_MAIL_FROM }}",
+        toEmail: "={{ $json.to }}",
+        subject: "={{ $json.subject }}",
+        emailFormat: "text",
+        text: "={{ $json.text }}",
+        options: { appendAttribution: false },
+      },
+      credentials: { smtp: SMTP_CREDENTIAL },
+    },
+    codeNode(wf, "Send (mock)", "send-mock.js", [x + 440, y], each),
+    codeNode(wf, "Mark sent", "mark-sent.js", [x + 660, y - 260], each),
+    codeNode(wf, "Mark failed", "mark-failed.js", [x + 660, y + 120], each),
+  ];
+  const connections = {
+    "Can send?": link("Email mode?", "Mark failed"),
+    "Email mode?": link("Send email", "Send (mock)"),
+    "Send email": link("Mark sent", "Mark failed"),
+    "Send (mock)": link(next),
+    "Mark sent": link(next),
+    "Mark failed": link(next),
+  };
+  return { nodes, connections };
+}
+
 // ---------------------------------------------------------------- 1. Request notifications
 const NOTIFY = "lendloopNotify01";
+const notifyDelivery = delivery(NOTIFY, 1320, 300, "Sign write-back");
 const notify = {
   id: NOTIFY,
   name: "LendLoop – Request notifications",
@@ -138,9 +188,10 @@ const notify = {
     },
     respond(NOTIFY, "Accept (202)", 202, { accepted: true }, [660, 200]),
     ifNode(NOTIFY, "Already delivered?", "={{ $json.duplicate }}", [880, 200]),
-    codeNode(NOTIFY, "Send notification (mock)", "notify-send.js", [1100, 300]),
-    codeNode(NOTIFY, "Sign write-back", "sign-writeback.js", [1320, 300]),
-    signedPost(NOTIFY, "Confirm to LendLoop", "/n8n/notification-status", [1540, 300]),
+    codeNode(NOTIFY, "Compose message", "notify-compose.js", [1100, 300]),
+    ...notifyDelivery.nodes,
+    codeNode(NOTIFY, "Sign write-back", "sign-writeback.js", [2200, 300]),
+    signedPost(NOTIFY, "Confirm to LendLoop", "/n8n/notification-status", [2420, 300]),
   ],
   connections: {
     "Convex webhook": link("Verify signature"),
@@ -148,14 +199,16 @@ const notify = {
     "Signature valid?": link("Accept (202)", "Reject (401)"),
     "Reject (401)": link("Flag rejected call"),
     "Accept (202)": link("Already delivered?"),
-    "Already delivered?": link(null, "Send notification (mock)"),
-    "Send notification (mock)": link("Sign write-back"),
+    "Already delivered?": link(null, "Compose message"),
+    "Compose message": link("Can send?"),
+    ...notifyDelivery.connections,
     "Sign write-back": link("Confirm to LendLoop"),
   },
 };
 
 // ---------------------------------------------------------------- 2. Overdue reminders
 const REMIND = "lendloopRemind01";
+const remindDelivery = delivery(REMIND, 1100, 300, "Sign write-back");
 const remind = {
   id: REMIND,
   name: "LendLoop – Daily overdue reminders",
@@ -184,17 +237,19 @@ const remind = {
     codeNode(REMIND, "Sign request", "remind-sign-fetch.js", [220, 300]),
     signedPost(REMIND, "Fetch overdue loans", "/n8n/overdue-loans", [440, 300]),
     codeNode(REMIND, "Split loans", "remind-split.js", [660, 300]),
-    codeNode(REMIND, "Send reminder (mock)", "remind-send.js", [880, 300], { mode: "runOnceForEachItem" }),
-    codeNode(REMIND, "Sign write-back", "sign-writeback.js", [1100, 300]),
-    signedPost(REMIND, "Record reminder in LendLoop", "/n8n/reminder-status", [1320, 300]),
+    codeNode(REMIND, "Compose message", "remind-compose.js", [880, 300], { mode: "runOnceForEachItem" }),
+    ...remindDelivery.nodes,
+    codeNode(REMIND, "Sign write-back", "sign-writeback.js", [1980, 300]),
+    signedPost(REMIND, "Record reminder in LendLoop", "/n8n/reminder-status", [2200, 300]),
   ],
   connections: {
     "Every day 09:00": link("Sign request"),
     "Run now (manual)": link("Sign request"),
     "Sign request": link("Fetch overdue loans"),
     "Fetch overdue loans": link("Split loans"),
-    "Split loans": link("Send reminder (mock)"),
-    "Send reminder (mock)": link("Sign write-back"),
+    "Split loans": link("Compose message"),
+    "Compose message": link("Can send?"),
+    ...remindDelivery.connections,
     "Sign write-back": link("Record reminder in LendLoop"),
   },
 };
