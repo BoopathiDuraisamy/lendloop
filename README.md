@@ -150,7 +150,9 @@ npm install
 
 ### 2. Clerk
 1. Create an application at https://dashboard.clerk.com.
-2. Enable the **Convex integration** (Dashboard → Integrations → Convex), or create a JWT template named `convex`. Make sure the token includes `email` and `name` claims, which LendLoop uses for display and admin bootstrap.
+2. Enable the **Convex integration** (Dashboard → Integrations → Convex), or create a JWT template named `convex`.
+   No custom claims are needed: the default token only carries the user id, and Convex fetches the
+   name and verified email from Clerk's Backend API (`convex/clerk.ts`). This works for Google, GitHub and email sign-ups.
 3. Copy the **Frontend API URL / issuer** (e.g. `https://xxx.clerk.accounts.dev`) and your API keys.
 
 ### 3. Convex
@@ -161,6 +163,7 @@ npx convex env set CLERK_JWT_ISSUER_DOMAIN https://xxx.clerk.accounts.dev
 npx convex env set ADMIN_EMAILS you@example.com
 npx convex env set N8N_WEBHOOK_SECRET "$(openssl rand -hex 32)"   # keep this value for n8n
 npx convex env set APP_URL http://localhost:3000
+npx convex env set CLERK_SECRET_KEY sk_test_...          # same as in .env.local; used to read profiles
 ```
 
 > **Reaching n8n from Convex:** a Convex **cloud** deployment can't call `localhost:5678`. Choose one:
@@ -214,6 +217,7 @@ Sign in with the email from `ADMIN_EMAILS` to see the Admin tab. Use a second ac
 | `.env.local` | `NEXT_PUBLIC_CONVEX_URL` | Convex client URL (written by `convex dev`) |
 | `.env.local` | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` | Clerk |
 | Convex env | `CLERK_JWT_ISSUER_DOMAIN` | JWT issuer Convex trusts |
+| Convex env | `CLERK_SECRET_KEY` | server-side lookup of the signed-in user's name + verified email |
 | Convex env | `ADMIN_EMAILS` | comma-separated emails granted admin on sign-in |
 | Convex env | `N8N_WEBHOOK_SECRET` | HMAC secret (shared with n8n) |
 | Convex env | `N8N_REQUEST_WEBHOOK_URL` | n8n webhook for request notifications |
@@ -230,7 +234,7 @@ Sign in with the email from `ADMIN_EMAILS` to see the Admin tab. Use a second ac
 - **Signed-in views show display names, never contact details.** Emails are visible only to admins and to the n8n notification payload for the single recipient.
 - **n8n gets the minimum.** One recipient's name and email, the tool name, the dates and the status. No other user ids, notes or descriptions. The overdue feed is the same: borrower name and email, tool, due date.
 - **Mock channel masks emails in logs** (`j***@example.com`).
-- **Identity comes from the verified JWT**, and the user row is keyed by `tokenIdentifier`. Name and email are taken from token claims, not client arguments.
+- **Identity comes from the verified JWT**, and the user row is keyed by `tokenIdentifier`. Name and email are fetched server-to-server from Clerk's Backend API (or taken from token claims if configured), never from client arguments. Admin requires an email in `ADMIN_EMAILS` that Clerk reports as **verified**.
 - **HMAC both ways**, with timestamped replay protection, constant-time comparison, a generic 401, a 16 KB body cap and per-field validation on every inbound payload.
 - **Idempotency everywhere it matters.** Outbound events are keyed `notify:<loan>:<event>`, and n8n also de-dupes by `eventId`. Reminders are keyed `overdue:<loan>:<date>` and errors `n8n-error:<executionId>`.
 - **Soft deletes** keep loan history readable for both parties after a listing is removed.

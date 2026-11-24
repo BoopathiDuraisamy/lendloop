@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { getCurrentUser, requireAdmin } from "./lib/auth";
 
@@ -12,9 +13,15 @@ function adminEmails(): Set<string> {
 }
 
 /**
- * Upsert the signed-in user from the verified JWT identity. Name/email come
- * from the token, never from client arguments. Admin role is granted only via
- * the ADMIN_EMAILS deployment env var or the internal `setRole` mutation.
+ * Upsert the signed-in user, keyed by the verified JWT identity. Never takes
+ * profile data from client arguments.
+ *
+ * Name/email: used from token claims when present; otherwise (Clerk's default
+ * token only has the user id) they're fetched server-side from Clerk's Backend
+ * API by `clerk.syncProfile`, which works for Google, GitHub and email sign-ups.
+ *
+ * Admin role is granted only for an email in ADMIN_EMAILS that is *verified*,
+ * or via the CLI-only internal `setRole` mutation.
  */
 export const store = mutation({
   args: {},
@@ -22,26 +29,50 @@ export const store = mutation({
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error("Not authenticated");
 
-    const email = identity.email?.toLowerCase();
-    const name = identity.name ?? identity.givenName ?? email?.split("@")[0] ?? "Neighbor";
-    const shouldBeAdmin = email !== undefined && identity.emailVerified !== false && adminEmails().has(email);
+    const tokenEmail = identity.email?.toLowerCase();
+    const tokenName = identity.name ?? identity.givenName;
+    const tokenAdmin = tokenEmail !== undefined && identity.emailVerified === true && adminEmails().has(tokenEmail);
 
-    const existing = await getCurrentUser(ctx);
-    if (existing) {
+    let userId = (await getCurrentUser(ctx))?._id;
+    if (userId) {
+      const existing = (await ctx.db.get(userId))!;
       const patch: Partial<typeof existing> = {};
-      if (existing.name !== name) patch.name = name;
-      if (existing.email !== email) patch.email = email;
-      if (shouldBeAdmin && existing.role !== "admin") patch.role = "admin";
-      if (Object.keys(patch).length) await ctx.db.patch(existing._id, patch);
-      return existing._id;
+      if (tokenName && existing.name !== tokenName) patch.name = tokenName;
+      if (tokenEmail && existing.email !== tokenEmail) patch.email = tokenEmail;
+      if (tokenAdmin && existing.role !== "admin") patch.role = "admin";
+      if (Object.keys(patch).length) await ctx.db.patch(userId, patch);
+    } else {
+      userId = await ctx.db.insert("users", {
+        tokenIdentifier: identity.tokenIdentifier,
+        name: tokenName ?? tokenEmail?.split("@")[0] ?? "Neighbor",
+        email: tokenEmail,
+        role: tokenAdmin ? "admin" : "user",
+        trustedLender: false,
+      });
     }
-    return await ctx.db.insert("users", {
-      tokenIdentifier: identity.tokenIdentifier,
-      name,
-      email,
-      role: shouldBeAdmin ? "admin" : "user",
-      trustedLender: false,
-    });
+
+    // Refresh name/email from Clerk (source of truth) in the background.
+    await ctx.scheduler.runAfter(0, internal.clerk.syncProfile, { userId, clerkUserId: identity.subject });
+    return userId;
+  },
+});
+
+/** Called by clerk.syncProfile with data fetched server-side from Clerk. */
+export const applyProfile = internalMutation({
+  args: {
+    userId: v.id("users"),
+    name: v.string(),
+    email: v.optional(v.string()),
+    emailVerified: v.boolean(),
+  },
+  handler: async (ctx, { userId, name, email, emailVerified }) => {
+    const user = await ctx.db.get(userId);
+    if (!user) return;
+    const patch: Partial<typeof user> = {};
+    if (user.name !== name) patch.name = name.slice(0, 80);
+    if (email && user.email !== email) patch.email = email;
+    if (email && emailVerified && adminEmails().has(email) && user.role !== "admin") patch.role = "admin";
+    if (Object.keys(patch).length) await ctx.db.patch(userId, patch);
   },
 });
 
