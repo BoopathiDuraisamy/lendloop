@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit",
     "dev:convex": "convex dev",
     "tunnel:refresh": "node n8n/scripts/refresh-tunnel.mjs",
-    "verify:integration": "node n8n/scripts/verify-integration.mjs"
+    "verify:integration": "node n8n/scripts/verify-integration.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.10.8",
@@ -21,13 +23,19 @@
     "react-dom": "19.3.0"
   },
   "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
     "@tailwindcss/turbopack": "4.3.3",
-    "@types/node": "^20",
+    "@types/node": "^22.20.7",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "convex-test": "^0.0.75",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
     "tailwindcss": "4.3.3",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^5.1.2"
+  },
+  "engines": {
+    "node": ">=22.12"
   }
 }

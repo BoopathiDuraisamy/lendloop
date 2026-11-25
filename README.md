@@ -6,6 +6,37 @@ A neighborhood tool-lending board. Neighbors list tools, request to borrow them 
 
 **Stack:** Next.js 16 (App Router) · TypeScript · Clerk (auth) · Convex (data + backend logic) · n8n (workflow automation, Docker) · Tailwind v4
 
+![Public page: tagline, sign-in, and the read-only tool board (name + category only)](docs/screenshots/public-page.png)
+
+## For reviewers
+
+| You're evaluating | Look at |
+|---|---|
+| **Code structure** | `convex/` (one module per area, shared `lib/`), `src/app/dashboard/*`, `n8n/code/*.js` → generated `n8n/workflows/*.json`. [Repository layout](#repository-layout) |
+| **Security** | Server-side RBAC in every Convex function (`convex/lib/auth.ts`); HMAC both ways with a replay window (`convex/lib/hmac.ts`); webhook-only public path; secrets only in env vars and n8n's encrypted credentials. [Security decisions](#security--data-minimization-decisions) |
+| **Integration & reliability** | Transactional outbox → signed webhook with retries; idempotent per-channel write-backs; error workflow → Admin "Automation failures". [n8n integration](#n8n-integration) |
+| **UX** | Live dashboard, availability + booked ranges, inline confirmations, per-loan activity ("Notification sent via email, slack · 2 days ago") |
+| **Reasoning** | Why each decision was made is next to it, plus [What I'd change for production](#what-id-change-for-production) |
+
+| Browse tools (availability, category filter) | Incoming requests (activity line per loan) | Admin → Members (roles, Trusted Lender) |
+|---|---|---|
+| ![Browse tools](docs/screenshots/dashboard.jpg) | ![Incoming requests](docs/screenshots/incoming.jpg) | ![Admin members](docs/screenshots/admin-members.jpg) |
+
+**Check it in two minutes, no accounts needed:**
+```bash
+npm install
+npm test                     # 28 backend tests: RBAC, loan rules, idempotent write-backs, HMAC, signed HTTP endpoints
+npm run typecheck && npm run lint
+```
+With the app configured ([Local setup](#local-setup)), `npm run verify:integration` checks the live signed endpoints
+and [How to verify](#how-to-verify) walks through the end-to-end flows.
+
+**Requirements map:** public page ✓ · auth-gated listing / requests / approvals / returns ✓ · category filter + availability ✓ ·
+My listings / My requests / Incoming ✓ · admin & user roles enforced in Convex ✓ · request notification workflow ✓ ·
+daily overdue reminders with write-back ✓ · signed payloads both ways ✓ · secrets out of code and JSON ✓ ·
+idempotent write-backs ✓ · retries + error workflow ✓ · *bonus:* automation activity per loan ✓ ·
+*beyond scope:* real email, Slack DMs and an anonymized Discord feed, in-app admin management, automated tests.
+
 ---
 
 ## Features
@@ -58,6 +89,7 @@ convex/
   automation.ts        internal payload builders + idempotent, per-channel write-backs
   http.ts              signed HTTP endpoints for n8n
   seed.ts              dev demo data: seed:demo / seed:reset (internal)
+  test.setup.ts        module map for convex-test (tests live in /tests)
 src/
   proxy.ts             Clerk (optimistic route gate for /dashboard)
   app/page.tsx         public page
@@ -71,6 +103,8 @@ n8n/
   scripts/verify-integration.mjs   reviewer check: signatures, replay window, idempotency
   webhook-proxy.conf   nginx allow-list: only POST /webhook/lendloop-request-events is public
   .env.example, secrets.env.example
+tests/                 Vitest + convex-test backend tests (npm test)
+docs/screenshots/      README images
 docker-compose.yml     n8n · n8n-import · n8n-credentials · webhook-proxy + tunnel (profile "tunnel")
 ```
 
@@ -173,7 +207,7 @@ Both workflows set `settings.errorWorkflow` to it (it must be published as well)
 ## Local setup
 
 ### Prerequisites
-- **Node 22+.** The Convex CLI refuses older versions: `npx convex …` and `npm run tunnel:refresh` fail with
+- **Node 22.12+.** The Convex CLI and the test runner (Vitest 5) refuse older versions: `npx convex …` and `npm run tunnel:refresh` fail with
   "Your Node version … is too old". With fnm: `fnm install 24` then `fnm use 24`, or prefix commands with `fnm exec --using=24`.
 - Docker Desktop (for n8n)
 - Free accounts: [Clerk](https://dashboard.clerk.com) and [Convex](https://www.convex.dev)
@@ -287,7 +321,7 @@ won't publish a workflow that references a missing credential. Sends through a p
 ```bash
 npm run dev                 # http://localhost:3000   (keep `npx convex dev` running)
 npx convex run seed:demo    # optional: 3 demo neighbors, 12 tools, loans in every state (one overdue),
-                            #           plus listings/requests/loans for every user who has signed in
+                            #           plus distinct listings/requests/loans for up to 3 signed-in users
 npx convex run seed:reset   # remove demo data (keeps real accounts); run seed:demo again for a fresh set
 ```
 Sign in with the email from `ADMIN_EMAILS` to see the Admin tab. Sign in once **before** `seed:demo` so your
@@ -298,6 +332,7 @@ own pages get data. Use a second account (or an incognito window) to try the bor
 |---|---|
 | `npm run dev` | Next.js dev server |
 | `npm run dev:convex` | Convex dev (codegen + push on save; Node 22+) |
+| `npm test` | backend test suite (Vitest + convex-test, Node 22.12+) |
 | `npm run typecheck` / `npm run lint` | checks |
 | `npm run verify:integration` | reviewer check of the signed n8n ↔ Convex endpoints (see below) |
 | `npm run tunnel:refresh` | new Cloudflare quick tunnel + update Convex webhook URL (Node 22+) |
@@ -306,6 +341,15 @@ own pages get data. Use a second account (or an incognito window) to try the bor
 ---
 
 ## How to verify
+
+**Automated tests** run Convex functions against an in-memory backend (`convex-test`), with no accounts or network:
+```bash
+npm test
+```
+- `tests/rbac.test.ts`: public data minimization, sign-in required, ownership checks, admin-only functions, admin grant/revoke guardrails
+- `tests/loans.test.ts`: request validation, overlap rules, auto-decline on approve, one decision per request, returns, availability
+- `tests/automation.test.ts`: idempotent reminder and notification write-backs, per-channel merging, overdue feed, HMAC, signed HTTP endpoints
+
 
 **Signed endpoints, replay window, idempotency.** Works with any Node version and reads the secret from `n8n/.env` without printing it:
 ```bash
@@ -399,5 +443,5 @@ Overdue loans show "Overdue reminder sent via …". Run it again: nothing is sen
 - **Scale**: paginate lists (`usePaginatedQuery`), denormalize availability onto `tools`, run the overdue query as a cursor or batched job, and rate-limit mutations (e.g. `@convex-dev/rate-limiter`).
 - **Observability**: alert on the error workflow (Slack or PagerDuty), use a Convex log stream to Datadog or Axiom, and add a dead-letter view with a "retry" button for failed notifications.
 - **Time zones**: store a neighborhood time zone and evaluate "overdue" in local time (currently UTC).
-- **Tests and CI**: `convex-test` unit tests for RBAC and idempotency, Playwright for the main flows, and lint, typecheck and `n8n:build --check` in CI.
+- **Tests and CI**: backend tests exist (`npm test`); add Playwright for the main UI flows and run tests, lint, typecheck and an `n8n:build` drift check in CI.
 - **Privacy**: a data-retention policy for automation events and loan history, and a data export and delete flow.

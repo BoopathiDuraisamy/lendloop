@@ -9,7 +9,7 @@ const addDays = (iso: string, n: number) =>
 
 type ToolSeed = [name: string, category: Category, condition: Condition, description: string];
 
-const TOOLS: Record<"alice" | "bob" | "chen" | "you", ToolSeed[]> = {
+const TOOLS: Record<"alice" | "bob" | "chen", ToolSeed[]> = {
   alice: [
     ["Cordless drill", "power_tools", "good", "18V with two batteries and a bit set."],
     ["4-person tent", "camping", "fair", "Easy setup, one small patch on the fly."],
@@ -28,12 +28,35 @@ const TOOLS: Record<"alice" | "bob" | "chen" | "you", ToolSeed[]> = {
     ["Pasta machine", "kitchen", "new", "Hand-crank, three cutter widths."],
     ["Carpet cleaner", "cleaning", "good", "Bring your own detergent."],
   ],
-  you: [
+};
+
+/** Listings for signed-in users: each real account gets a different set (no duplicates on the board). */
+const YOUR_TOOLS: ToolSeed[][] = [
+  [
     ["Mitre saw", "power_tools", "good", "10 inch, great for trim and skirting."],
     ["Wheelbarrow", "garden", "fair", "Pneumatic tyre, a bit rusty."],
     ["Step ladder", "ladders", "good", "5 steps, aluminium."],
   ],
-};
+  [
+    ["Tile cutter", "power_tools", "good", "Wet cutter, 600mm rail."],
+    ["Leaf blower", "garden", "new", "Cordless, battery included."],
+    ["Fondue set", "kitchen", "good", "Six forks, burner gel not included."],
+  ],
+  [
+    ["Jigsaw", "power_tools", "fair", "Comes with wood and metal blades."],
+    ["Hammock", "camping", "good", "Straps included, fits most trees."],
+    ["Steam mop", "cleaning", "good", "Two spare pads."],
+  ],
+];
+
+/**
+ * What each signed-in account borrows from the demo neighbors. Each account uses
+ * different demo tools so approved loans never overlap on the same tool.
+ */
+const YOUR_BORROWING = [
+  { upcoming: ["chen", "Circular saw"], pending: ["bob", "Camping stove"], overdue: ["alice", "Pressure washer"], returned: ["chen", "Pasta machine"] },
+  { upcoming: ["bob", "Hedge trimmer"], pending: ["chen", "Carpet cleaner"], overdue: ["alice", "Socket wrench set"], returned: ["bob", "Stand mixer"] },
+] as const;
 
 async function upsertDemoUser(ctx: MutationCtx, key: string, name: string, email: string, trusted: boolean) {
   const tokenIdentifier = `seed|${key}`;
@@ -113,23 +136,43 @@ export const demo = internalMutation({
     await loan(c["Lawn mower"], "Lawn mower", chen, alice, -20, -15, "returned");
     await loan(b["Stand mixer"], "Stand mixer", bob, alice, 6, 7, "declined");
 
-    // Include the real signed-in user(s), if any.
-    const realUsers = (await ctx.db.query("users").collect()).filter((u) => !u.tokenIdentifier.startsWith("seed|"));
-    for (const me of realUsers) {
-      const mine = await addTools(ctx, me._id, TOOLS.you);
+    // Include the real signed-in user(s), if any: own listings with incoming requests,
+    // plus requests they made. Each account gets distinct tools and dates.
+    const realUsers = (await ctx.db.query("users").collect())
+      .filter((u) => !u.tokenIdentifier.startsWith("seed|"))
+      .slice(0, YOUR_TOOLS.length);
+    const neighbors = { alice: { id: alice, tools: a }, bob: { id: bob, tools: b }, chen: { id: chen, tools: c } };
+
+    for (const [i, me] of realUsers.entries()) {
+      const set = YOUR_TOOLS[i];
+      const mine = await addTools(ctx, me._id, set);
+      const [first, second, third] = set.map(([name]) => name);
       // Incoming: two pending requests on your tools, one active loan (on loan now).
-      await loan(mine["Mitre saw"], "Mitre saw", me._id, bob, 2, 4, "pending", "Putting up new skirting boards.");
-      await loan(mine["Wheelbarrow"], "Wheelbarrow", me._id, chen, 1, 1, "pending", "Moving some gravel, just for a day.");
-      await loan(mine["Step ladder"], "Step ladder", me._id, alice, -3, 3, "approved");
+      await loan(mine[first], first, me._id, bob, 2, 4, "pending", "Need it for a weekend project.");
+      await loan(mine[second], second, me._id, chen, 1, 1, "pending", "Just for a day, I'll bring it right back.");
+      await loan(mine[third], third, me._id, alice, -3, 3, "approved");
+
       // Your requests: approved upcoming, pending, overdue, and a returned one.
-      await loan(c["Circular saw"], "Circular saw", chen, me._id, 4, 6, "approved");
-      await loan(b["Camping stove"], "Camping stove", bob, me._id, 10, 12, "pending", "Family camping weekend.");
-      await loan(a["Pressure washer"], "Pressure washer", alice, me._id, -6, -1, "approved"); // overdue
-      await loan(c["Pasta machine"], "Pasta machine", chen, me._id, -30, -28, "returned");
+      const plan = YOUR_BORROWING[i];
+      if (!plan) continue;
+      const borrow = async (
+        [who, tool]: readonly ["alice" | "bob" | "chen", string],
+        start: number,
+        end: number,
+        status: "approved" | "pending" | "returned",
+        msg?: string,
+      ) => {
+        const n = neighbors[who];
+        await loan(n.tools[tool], tool, n.id, me._id, start, end, status, msg);
+      };
+      await borrow(plan.upcoming, 4, 6, "approved");
+      await borrow(plan.pending, 10, 12, "pending", "Family weekend away.");
+      await borrow(plan.overdue, -6, -1, "approved"); // overdue
+      await borrow(plan.returned, -30, -28, "returned");
     }
 
     return `Seeded 3 demo neighbors, 12 tools and 5 loans${
-      realUsers.length ? `, plus 3 tools and 7 loans for ${realUsers.length} signed-in user(s)` : ""
+      realUsers.length ? `, plus 3 tools and up to 7 loans for each of ${realUsers.length} signed-in user(s)` : ""
     }.`;
   },
 });
